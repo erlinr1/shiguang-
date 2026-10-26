@@ -23,7 +23,7 @@
   }
 
   const APP_VERSION = '0.1.0';
-  const STATE_VERSION = 2;
+  const STATE_VERSION = 3;
   // Never rename STORE_KEY: old installs must keep their data.
   const STORE_KEY = 'shici.state.v1';
   const DAY_MS = 86400000;
@@ -90,6 +90,8 @@
     libraryPage: 1,
     libraryLimit: 60,
     statsPage: 1,
+    libraryShuffle: false,
+    libraryShuffleSeed: '',
     session: null,
     spell: null,
     onboard: { step: 1, book: 'senior', goal: 20, name: '单词旅人' },
@@ -200,6 +202,7 @@
         autoSpeak: true,
         accent: 'us',
         theme: 'light',
+        shuffle: false,
       },
       progress: {},
       favorites: [],
@@ -210,6 +213,7 @@
       stats: { totalNew: 0, totalReviews: 0, correct: 0, wrong: 0, spell: 0, seconds: 0 },
       customBooks: {},
       spellMode: 'word',
+      spellSource: 'learned',
       session: null,
     };
   }
@@ -223,6 +227,18 @@
     if (!next.customBooks || typeof next.customBooks !== 'object') next.customBooks = {};
     if (!next.spellMode) next.spellMode = 'word';
     if (!('session' in next)) next.session = null;
+    return next;
+  });
+
+  /**
+   * v2 -> v3: shuffle mode and "only learned words" spell source.
+   */
+  registerStateMigration(2, (data) => {
+    const next = { ...data };
+    const profile = { ...(next.profile || {}) };
+    if (typeof profile.shuffle !== 'boolean') profile.shuffle = false;
+    next.profile = profile;
+    if (!next.spellSource) next.spellSource = 'auto';
     return next;
   });
 
@@ -274,6 +290,7 @@
       stats: { ...defaultState().stats, ...(parsed.stats || {}) },
       customBooks: parsed.customBooks && typeof parsed.customBooks === 'object' ? parsed.customBooks : {},
       spellMode: ['word', 'meaning', 'audio'].includes(parsed.spellMode) ? parsed.spellMode : 'word',
+      spellSource: ['learned', 'all', 'auto'].includes(parsed.spellSource) ? parsed.spellSource : 'learned',
       session: parsed.session && typeof parsed.session === 'object' ? parsed.session : null,
       progress: {},
       favorites: [],
@@ -415,7 +432,8 @@
     return list;
   }
 
-  /* -------- User-imported wordbooks -------- */
+  
+/* -------- User-imported wordbooks -------- */
   const CUSTOM_WORD_BOOK_KEY = 'shici.custombooks.v1';
   const CUSTOM_WORDS = new Map();      // id -> word object (only the user's own words)
   const CUSTOM_WORD_IDS = new Set();   // ids that came from an imported list
@@ -1047,10 +1065,31 @@
           <option value="mistake" ${ui.libraryFilter === 'mistake' ? 'selected' : ''}>错词本</option>
           <option value="favorite" ${ui.libraryFilter === 'favorite' ? 'selected' : ''}>我的收藏</option>
         </select>
+        <button class="btn btn-sm ${ui.libraryShuffle ? 'btn-primary' : 'btn-ghost'}" data-action="toggle-shuffle-library" aria-pressed="${ui.libraryShuffle ? 'true' : 'false'}"><svg><use href="#i-shuffle"/></svg>${ui.libraryShuffle ? '已乱序' : '乱序看单词'}</button>
         <span class="word-count" id="library-count"></span>
       </div>
       <div id="library-results"></div>
     `;
+  }
+
+  // Stable pseudo-random order per (book, seed) so paging and re-renders
+  // keep the same shuffled sequence instead of re-shuffling every render.
+  function pseudoRandom(seed) {
+    let h = 2166136261;
+    const str = String(seed);
+    for (let i = 0; i < str.length; i++) {
+      h ^= str.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    return ((h >>> 0) % 100000) / 100000;
+  }
+
+  function shuffleWords(list) {
+    const seed = ui.libraryShuffleSeed || 'seed';
+    return list
+      .map(w => ({ w, k: pseudoRandom(`${seed}:${w.id}`) }))
+      .sort((a, b) => a.k - b.k)
+      .map(item => item.w);
   }
 
   function filteredLibraryWords() {
@@ -1060,7 +1099,17 @@
     if (ui.libraryFilter === 'favorite') list = list.filter(w => isFavorite(w.id));
     else if (ui.libraryFilter === 'mistake') list = list.filter(isMistakeWord);
     else if (ui.libraryFilter !== 'all') list = list.filter(w => statusOf(w) === ui.libraryFilter);
+    if (ui.libraryShuffle) list = shuffleWords(list);
     return list;
+  }
+
+  function toggleLibraryShuffle() {
+    ui.libraryShuffle = !ui.libraryShuffle;
+    // New seed each time it is turned on, so the order is genuinely random.
+    ui.libraryShuffleSeed = ui.libraryShuffle ? `${Date.now()}` : '';
+    ui.libraryPage = 1;
+    renderRoute();
+    toast(ui.libraryShuffle ? '词库已乱序排列' : '词库已恢复字母顺序', 'book');
   }
 
   function renderLibraryResults() {
@@ -1300,7 +1349,12 @@
         </div>
       </div>
 
-      <div class="section-head"><div><h2>学过的单词</h2><p>${learnedList.length ? `共 ${learnedList.length} 个，最近的排在前面。` : '还没有学过的词。'}</p></div></div>
+      <div class="section-head"><div><h2>学过的单词</h2><p>${learnedList.length ? `共 ${learnedList.length} 个，最近的排在前面。` : '还没有学过的词。'}</p></div>${state.profile.shuffle ? '<span class="pill pill-accent">乱序学习中</span>' : ''}</div>
+      ${learnedList.length ? `<div class="learned-actions">
+        <button class="btn btn-primary btn-sm" data-action="review-learned"><svg><use href="#i-review"/></svg>复习学过的词</button>
+        <button class="btn btn-soft btn-sm" data-action="spell-learned"><svg><use href="#i-keyboard"/></svg>听写学过的词</button>
+        <span class="pill">${learnedList.length} 个可用</span>
+      </div>` : ''}
       ${learnedList.length ? `<div class="card learned-card">
         <div class="learned-list">
           ${learnedList.slice(0, shown).map(({ w, p }) => `
@@ -1363,6 +1417,17 @@
               <button class="${state.profile.book === 'senior' ? 'is-on' : ''}" data-action="set-book" data-book="senior">高中</button>
               <button class="${state.profile.book === 'zhuanshengben' ? 'is-on' : ''}" data-action="set-book" data-book="zhuanshengben">专升本</button>
               <button class="${state.profile.book === 'all' ? 'is-on' : ''}" data-action="set-book" data-book="all">全部</button>
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="label"><strong>乱序背单词</strong><span>开启后，新词从整个词库随机抽取，不按字母顺序。</span></div>
+            <label class="switch"><input type="checkbox" id="shuffle-words" ${state.profile.shuffle ? 'checked' : ''}><span></span></label>
+          </div>
+          <div class="setting-row">
+            <div class="label"><strong>听写范围</strong><span>默认只考学过的词，避免听写没见过的生词。</span></div>
+            <div class="segmented">
+              <button class="${state.spellSource !== 'all' ? 'is-on' : ''}" data-action="set-spell-source" data-source="learned">只考学过</button>
+              <button class="${state.spellSource === 'all' ? 'is-on' : ''}" data-action="set-spell-source" data-source="all">含新词</button>
             </div>
           </div>
           <div class="setting-row">
@@ -1487,6 +1552,8 @@
       if (auto) auto.addEventListener('change', onAutoSpeak);
       const file = document.getElementById('import-file');
       if (file) file.addEventListener('change', onImportFile);
+      const shuffleBox = document.getElementById('shuffle-words');
+      if (shuffleBox) shuffleBox.addEventListener('change', onShuffleChange);
     }
     if (custom && typeof custom.afterRender === 'function') custom.afterRender();
     window.scrollTo(0, 0);
@@ -1638,6 +1705,15 @@
 
 /* ===== 15-session.js ===== */
 /* ---------------- Study session ---------------- */
+  function shuffleList(list) {
+    const out = list.slice();
+    for (let i = out.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [out[i], out[j]] = [out[j], out[i]];
+    }
+    return out;
+  }
+
   function buildQueue(mode, extra = 10) {
     const book = state.profile.book;
     const today = dateKey();
@@ -1645,8 +1721,19 @@
     const due = dueWords(book);
     if (mode === 'single') return [];
     if (mode === 'review') return due.slice(0, MAX_QUEUE).map(w => ({ id: w.id, type: 'review' }));
+    // 只复习已经学过的词，不看是否到期
+    if (mode === 'learned') {
+      const learned = Object.keys(state.progress)
+        .map(id => WORD_BY_ID.get(id))
+        .filter(w => w && bookWords(book).includes(w));
+      const pool = learned.length ? learned : Object.keys(state.progress).map(id => WORD_BY_ID.get(id)).filter(Boolean);
+      return shuffleList(pool).slice(0, Math.min(MAX_QUEUE, Math.max(20, state.profile.dailyGoal))).map(w => ({ id: w.id, type: 'review' }));
+    }
+    const shuffled = state.profile.shuffle;
     const newLimit = mode === 'extra' ? extra : Math.max(0, state.profile.dailyGoal - (day.newIds?.length || day.new || 0));
-    const fresh = pickNewWords(newLimit, book).map(w => ({ id: w.id, type: 'new' }));
+    let freshList = pickNewWords(shuffled ? 400 : newLimit, book);
+    if (shuffled) freshList = shuffleList(freshList).slice(0, newLimit);
+    const fresh = freshList.map(w => ({ id: w.id, type: 'new' }));
     if (mode === 'mixed') {
       const reviewPart = due.slice(0, 40).map(w => ({ id: w.id, type: 'review' }));
       return reviewPart.concat(fresh);
@@ -2078,15 +2165,39 @@
 
 /* ===== 16-spell.js ===== */
 /* ---------------- Spelling challenge ---------------- */
-  function openSpell() {
-    const learned = Object.keys(state.progress).map(id => WORD_BY_ID.get(id)).filter(Boolean);
-    let pool = learned.filter(w => !w.phrase && w.w.length > 2);
-    if (pool.length < 10) {
+  function spellPool(source) {
+    const learned = Object.keys(state.progress)
+      .map(id => WORD_BY_ID.get(id))
+      .filter(w => w && !w.phrase && w.w.length > 2);
+    if (source === 'learned') return uniqBy(learned, w => w.id).filter(w => /^[A-Za-z][A-Za-z'\- ]*$/.test(w.w));
+    let pool = learned.slice();
+    if (source !== 'learned') {
       pool = pool.concat(pickNewWords(40).filter(w => !w.phrase && w.w.length > 2));
     }
-    pool = uniqBy(pool, w => w.id).filter(w => /^[A-Za-z][A-Za-z'\- ]*$/.test(w.w));
-    if (!pool.length) { toast('先学几个词，再来听写吧', 'book'); return; }
-    const queue = shuffle(pool).slice(0, 10);
+    return uniqBy(pool, w => w.id).filter(w => /^[A-Za-z][A-Za-z'\- ]*$/.test(w.w));
+  }
+
+  function setSpellSource(source) {
+    if (!['learned', 'all'].includes(source)) return;
+    state.spellSource = source;
+    save();
+    renderRoute();
+    toast(source === 'learned' ? '听写范围：只考学过的词' : '听写范围：学过的词优先', 'keyboard');
+  }
+
+  function openSpell(opts = {}) {
+    // 默认只考学过的词；source=learned 时严格不混入新词。
+    const source = opts.source || state.spellSource || 'learned';
+    let pool = spellPool(source);
+    if (!pool.length) {
+      if (source === 'learned') {
+        toast('还没有学过的词，先去学几个再来听写', 'book');
+        return;
+      }
+      toast('先学几个词，再来听写吧', 'book');
+      return;
+    }
+    const queue = shuffle(pool).slice(0, Math.min(10, pool.length));
     ui.spell = { queue, index: 0, score: 0, answered: false, answer: '', mode: state.spellMode || 'word' };
     renderSpellModal();
     setTimeout(() => {
@@ -2383,6 +2494,9 @@
           profile: { ...defaultState().profile, ...(imported.profile || {}) },
           streak: { ...defaultState().streak, ...(imported.streak || {}) },
           stats: { ...defaultState().stats, ...(imported.stats || {}) },
+          spellSource: ['learned', 'all', 'auto'].includes(imported.spellSource) ? imported.spellSource : 'learned',
+          customBooks: imported.customBooks && typeof imported.customBooks === 'object' ? imported.customBooks : {},
+          session: imported.session && typeof imported.session === 'object' ? imported.session : null,
           progress: sanitizeProgress(imported.progress),
           favorites: Array.isArray(imported.favorites) ? imported.favorites.filter(id => WORD_BY_ID.has(id)) : [],
           notes: imported.notes && typeof imported.notes === 'object' ? imported.notes : {},
@@ -2404,7 +2518,8 @@
     e.target.value = '';
   }
 
-  /* -------- Custom wordbook import -------- */
+  
+/* -------- Custom wordbook import -------- */
   function parseBookText(text) {
     const out = [];
     const seen = new Set();
@@ -2453,14 +2568,52 @@
           <pre class="book-sample">apple	苹果	ˈæpl
 banjo,班卓琴
 cherry 樱桃</pre>
-          <div class="setting-row">
-            <div class="label"><strong>选择文件</strong><span>.txt / .csv / .md，最多 5,000 个词。</span></div>
-            <button class="btn btn-sm btn-soft" data-action="import-book"><svg><use href="#i-upload"/></svg>选择</button>
-          </div>
-          <input type="file" id="book-file" accept=".txt,.csv,.md,text/plain,text/csv" hidden>
+          <!-- A visible <label for> is the only reliable file picker on mobile:
+               programmatic .click() on a hidden input is blocked by iOS/Android browsers. -->
+          <label class="file-picker" for="book-file">
+            <svg><use href="#i-upload"/></svg>
+            <span><strong>选择词库文件</strong><small>.txt / .csv / .md · 最多 5,000 个词</small></span>
+          </label>
+          <input class="file-input-native" type="file" id="book-file" accept=".txt,.csv,.md,text/plain,text/csv">
+          <div class="import-tip">手机提示：文件要先保存到「文件」App 或手机存储，这里才能选到。也可以点击下方按钮直接粘贴。</div>
+          <button class="btn btn-ghost btn-block" data-action="open-book-paste"><svg><use href="#i-pencil"/></svg>直接粘贴单词</button>
         </div>
       </div>
     `);
+  }
+
+  function openBookPaste() {
+    openModal(`
+      <div class="modal-backdrop" data-action="backdrop">
+        <div class="modal-card" role="dialog" aria-modal="true" aria-label="粘贴单词">
+          <button class="icon-btn modal-close" data-action="close-modal" aria-label="关闭"><svg><use href="#i-close"/></svg></button>
+          <div class="modal-head"><div class="eyebrow">PASTE WORDS</div><h2>直接粘贴单词</h2><p>每行一个词，格式：单词 空格/Tab/逗号 释义。</p></div>
+          <div class="setting-row" style="padding-top:0">
+            <div class="label"><strong>词库名称</strong></div>
+            <input class="text-input" id="paste-book-name" type="text" maxlength="16" placeholder="我的词库" autocomplete="off">
+          </div>
+          <textarea class="paste-area" id="paste-book-text" placeholder="apple	苹果&#10;banjo,班卓琴&#10;cherry 樱桃"></textarea>
+          <button class="btn btn-primary btn-block" style="margin-top:14px" data-action="save-pasted-book">保存并导入</button>
+        </div>
+      </div>
+    `);
+  }
+
+  function savePastedBook() {
+    const area = document.getElementById('paste-book-text');
+    const nameInput = document.getElementById('paste-book-name');
+    const text = area ? area.value : '';
+    const words = parseBookText(text);
+    if (!words.length) { toast('没识别到单词，每行写「单词 释义」', 'close'); return; }
+    const label = ((nameInput && nameInput.value) || '我的词库').trim().slice(0, 16) || '我的词库';
+    const key = createBookFromText(words, label);
+    if (!key) { toast('导入失败，请检查格式', 'close'); return; }
+    state.profile.book = key;
+    save();
+    closeModal();
+    topbar();
+    navigate('library');
+    toast(`已导入 ${words.length} 个词到「${label}」`, 'book');
   }
 
   function onBookFile(e) {
@@ -2549,6 +2702,11 @@ cherry 樱桃</pre>
     state.profile.autoSpeak = e.target.checked;
     save();
   }
+  function onShuffleChange(e) {
+    state.profile.shuffle = e.target.checked;
+    save();
+    toast(state.profile.shuffle ? '已开启乱序背单词' : '已恢复按顺序背单词', 'book');
+  }
 
   function toggleSidebar(force) {
     const sidebar = $('.sidebar');
@@ -2589,10 +2747,16 @@ cherry 樱桃</pre>
         break;
       case 'import-book': document.getElementById('book-file')?.click(); break;
       case 'open-book-import': openBookImport(); break;
+      case 'open-book-paste': openBookPaste(); break;
+      case 'save-pasted-book': savePastedBook(); break;
       case 'delete-book': deleteCustomBook(el.dataset.book); break;
       case 'set-filter': ui.libraryFilter = el.dataset.filter; ui.libraryPage = 1; renderRoute(); break;
+      case 'toggle-shuffle-library': toggleLibraryShuffle(); break;
       case 'stats-more': ui.statsPage += 1; renderRoute(); break;
       case 'start-review': openSession({ mode: 'review' }); break;
+      case 'review-learned': openSession({ mode: 'learned' }); break;
+      case 'spell-learned': openSpell({ source: 'learned' }); break;
+      case 'set-spell-source': setSpellSource(el.dataset.source); break;
       case 'start-extra': closeSummary(); openSession({ mode: 'extra', extra: 10 }); break;
       case 'open-spell': openSpell(); break;
       case 'close-session': closeSession(); break;
