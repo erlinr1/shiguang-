@@ -1,0 +1,56 @@
+如果 GitHub 网页上传时没有带上隐藏的 .github 文件夹：
+
+1. 在仓库页面点 Add file -> Create new file
+2. 文件名填：
+   .github/workflows/build-apk.yml
+3. 把下面整段内容粘贴进去
+4. Commit changes
+5. 去 Actions -> Build Shici APK -> Run workflow
+
+---------------- 下面开始复制 ----------------
+
+name: Build Shici APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platforms;android-34 build-tools;34.0.0'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Cache debug keystore
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: shici-debug-keystore-v1
+
+      - name: Build debug APK
+        run: gradle assembleDebug --no-daemon
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: shici-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error

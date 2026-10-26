@@ -1,0 +1,22 @@
+{
+  "name": "拾词 · 初高中 / 专升本英语单词",
+  "short_name": "拾词",
+  "description": "每天拾起一点词汇的光。面向初高中与专升本考生的离线英语单词学习工具。",
+  "lang": "zh-CN",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "display_override": ["standalone", "minimal-ui"],
+  "orientation": "portrait-primary",
+  "background_color": "#f3f0e7",
+  "theme_color": "#2f5d50",
+  "categories": ["education", "productivity"],
+  "icons": [
+    {
+      "src": "assets/img/logo.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
