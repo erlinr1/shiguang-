@@ -23,7 +23,8 @@
   }
 
   const APP_VERSION = '0.1.0';
-  const STATE_VERSION = 1;
+  const STATE_VERSION = 2;
+  // Never rename STORE_KEY: old installs must keep their data.
   const STORE_KEY = 'shici.state.v1';
   const DAY_MS = 86400000;
   const MAX_QUEUE = 60;
@@ -88,6 +89,7 @@
     libraryFilter: 'all',
     libraryPage: 1,
     libraryLimit: 60,
+    statsPage: 1,
     session: null,
     spell: null,
     onboard: { step: 1, book: 'senior', goal: 20, name: '单词旅人' },
@@ -206,8 +208,23 @@
       days: {},
       streak: { current: 0, best: 0, last: '' },
       stats: { totalNew: 0, totalReviews: 0, correct: 0, wrong: 0, spell: 0, seconds: 0 },
+      customBooks: {},
+      spellMode: 'word',
+      session: null,
     };
   }
+
+  /**
+   * v1 -> v2: user wordbooks, spell mode, resumable session.
+   * All fields are additive so a v1 backup still imports cleanly.
+   */
+  registerStateMigration(1, (data) => {
+    const next = { ...data };
+    if (!next.customBooks || typeof next.customBooks !== 'object') next.customBooks = {};
+    if (!next.spellMode) next.spellMode = 'word';
+    if (!('session' in next)) next.session = null;
+    return next;
+  });
 
   const IDB_NAME = 'shici-db';
   const IDB_STORE = 'state';
@@ -255,13 +272,21 @@
       profile: { ...defaultState().profile, ...(parsed.profile || {}) },
       streak: { ...defaultState().streak, ...(parsed.streak || {}) },
       stats: { ...defaultState().stats, ...(parsed.stats || {}) },
-      progress: sanitizeProgress(parsed.progress),
-      favorites: Array.isArray(parsed.favorites) ? parsed.favorites.filter(id => WORD_BY_ID.has(id)) : [],
+      customBooks: parsed.customBooks && typeof parsed.customBooks === 'object' ? parsed.customBooks : {},
+      spellMode: ['word', 'meaning', 'audio'].includes(parsed.spellMode) ? parsed.spellMode : 'word',
+      session: parsed.session && typeof parsed.session === 'object' ? parsed.session : null,
+      progress: {},
+      favorites: [],
       notes: parsed.notes && typeof parsed.notes === 'object' ? parsed.notes : {},
-      mistakeExcluded: Array.isArray(parsed.mistakeExcluded)
-        ? parsed.mistakeExcluded.filter(id => WORD_BY_ID.has(id)) : [],
+      mistakeExcluded: [],
       days: parsed.days && typeof parsed.days === 'object' ? parsed.days : {},
     };
+    // Imported wordbooks must exist before we validate ids against WORD_BY_ID.
+    rebuildCustomBooks();
+    state.progress = sanitizeProgress(parsed.progress);
+    state.favorites = Array.isArray(parsed.favorites) ? parsed.favorites.filter(id => WORD_BY_ID.has(id)) : [];
+    state.mistakeExcluded = Array.isArray(parsed.mistakeExcluded)
+      ? parsed.mistakeExcluded.filter(id => WORD_BY_ID.has(id)) : [];
   }
 
   async function loadState() {
@@ -384,10 +409,92 @@
     }
     else if (CUSTOM_BOOKS.has(book)) {
       const custom = CUSTOM_BOOKS.get(book);
-      list = typeof custom.filter === 'function' ? WORDS.filter(custom.filter) : WORDS;
-    } else list = WORDS;
+      list = typeof custom.filter === 'function' ? allWords().filter(custom.filter) : allWords();
+    } else list = allWords();
     bookCache.set(book, list);
     return list;
+  }
+
+  /* -------- User-imported wordbooks -------- */
+  const CUSTOM_WORD_BOOK_KEY = 'shici.custombooks.v1';
+  const CUSTOM_WORDS = new Map();      // id -> word object (only the user's own words)
+  const CUSTOM_WORD_IDS = new Set();   // ids that came from an imported list
+
+  function customWordId(bookKey, word, order) {
+    const slug = String(word).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+    return `u_${bookKey}_${slug || order}`;
+  }
+
+  function normalizeCustomWord(raw, bookKey, order) {
+    const w = String(raw.w || raw.word || raw.name || '').trim();
+    if (!w || w.length > 40) return null;
+    const id = customWordId(bookKey, w, order);
+    const tr = String(raw.tr || raw.trans || raw.meaning || '').trim();
+    const ph = String(raw.ph || raw.phonetic || '').trim();
+    return {
+      id,
+      w,
+      ph,
+      tr: tr || '（未填写释义）',
+      levels: [],
+      rank: order,
+      freq: 0,
+      proper: false,
+      phrase: w.includes(' '),
+      example: null,
+      orderZhuanshengben: null,
+      custom: bookKey,
+    };
+  }
+
+  function rebuildCustomBooks() {
+    CUSTOM_WORDS.clear();
+    CUSTOM_WORD_IDS.clear();
+    const books = state.customBooks && typeof state.customBooks === 'object' ? state.customBooks : {};
+    for (const [key, book] of Object.entries(books)) {
+      if (!book || !Array.isArray(book.words)) continue;
+      const ids = [];
+      book.words.forEach((raw, i) => {
+        const word = normalizeCustomWord(raw, key, i);
+        if (!word || CUSTOM_WORDS.has(word.id)) return;
+        CUSTOM_WORDS.set(word.id, word);
+        CUSTOM_WORD_IDS.add(word.id);
+        ids.push(word.id);
+      });
+      registerBook(key, {
+        label: book.label || '我的词库',
+        filter: w => CUSTOM_WORD_IDS.has(w.id) && CUSTOM_WORDS.get(w.id)?.custom === key,
+      });
+      registerBook(`${key}_ids`, { label: book.label || '我的词库' });
+    }
+    for (const [id, word] of CUSTOM_WORDS) {
+      if (!WORD_BY_ID.has(id)) WORD_BY_ID.set(id, word);
+    }
+  }
+
+  /** Words available to the app: bundled list + the user's imported words. */
+  function allWords() {
+    const custom = [...CUSTOM_WORDS.values()];
+    return custom.length ? WORDS.concat(custom) : WORDS;
+  }
+
+  function customBooks() {
+    return state.customBooks && typeof state.customBooks === 'object' ? state.customBooks : {};
+  }
+
+  function saveCustomBook(key, label, words) {
+    if (!state.customBooks || typeof state.customBooks !== 'object') state.customBooks = {};
+    state.customBooks[key] = { label, words };
+    rebuildCustomBooks();
+    bookCache.clear();
+  }
+
+  function removeCustomBook(key) {
+    if (!state.customBooks || !state.customBooks[key]) return;
+    delete state.customBooks[key];
+    rebuildCustomBooks();
+    bookCache.clear();
+    if (state.profile.book === key) state.profile.book = 'senior';
   }
 
   function progressOf(id) { return state.progress[id] || null; }
@@ -462,17 +569,26 @@
     const rest = pool.filter(w => w.proper || w.phrase);
     return core.concat(rest).slice(0, limit);
   }
+  function hasDueWords(book = state.profile.book) {
+    for (const w of bookWords(book)) {
+      if (isDueProgress(progressOf(w.id))) return true;
+    }
+    return false;
+  }
+
   function counts(book = state.profile.book) {
     const list = bookWords(book);
-    let newCount = 0, learning = 0, reviewing = 0, mastered = 0;
+    let newCount = 0, learning = 0, reviewing = 0, mastered = 0, mistakes = 0;
     for (const w of list) {
       const p = progressOf(w.id);
       if (!p) newCount++;
       else if (p.status === 'mastered') mastered++;
       else if (isDueProgress(p)) reviewing++;
       else learning++;
+      // Count in the same pass; sorting a 6k list here caused mobile jank.
+      if (p && mistakeScore(w) >= 2) mistakes++;
     }
-    return { total: list.length, newCount, learning, reviewing, mastered, mistakes: mistakeWords(book).length };
+    return { total: list.length, newCount, learning, reviewing, mastered, mistakes };
   }
 
 
@@ -706,7 +822,7 @@
     if (topAvatar) topAvatar.textContent = name.slice(0, 1);
     if (sideAvatar) sideAvatar.textContent = name.slice(0, 1);
     const dot = document.getElementById('review-dot');
-    if (dot) dot.hidden = dueWords().length === 0;
+    if (dot) dot.hidden = !hasDueWords();
   }
 
   function setRouteChrome(route) {
@@ -768,6 +884,7 @@
     const learnedToday = day.newIds ? day.newIds.length : day.new || 0;
     const reviewedToday = day.reviewIds ? day.reviewIds.length : day.review || 0;
     const p = pct(learnedToday, goal);
+    const ringOffset = (339.292 * (1 - Math.min(100, Math.max(0, p)) / 100)).toFixed(1);
     const hour = new Date().getHours();
     const greeting = hour < 5 ? '夜深了' : hour < 11 ? '早上好' : hour < 14 ? '中午好' : hour < 18 ? '下午好' : '晚上好';
     const todayDate = parseKey(today);
@@ -781,7 +898,9 @@
       const d = state.days[k];
       week.push({ key: k, label: weekdayCN(parseKey(k)), done: !!d && ((d.new || 0) + (d.review || 0) > 0), today: k === today });
     }
-    const continueWord = due[0] || pickNewWords(1)[0] || (state.favorites.length ? WORD_BY_ID.get(state.favorites[0]) : null) || WORDS[0];
+    const pending = pendingSession();
+    const resumeWord = pending ? WORD_BY_ID.get(pending.fresh[0].id) : null;
+    const startLabel = pending ? `继续学习（剩 ${pending.remaining} 个）` : '开始今日学习';
     const quests = [
       { label: '学习新词', detail: `${learnedToday} / ${goal} 个`, value: pct(learnedToday, goal), done: learnedToday >= goal, icon: 'book' },
       { label: '复习到期词', detail: due.length ? `${due.length} 个待复习` : '今天已清空', value: due.length ? pct(reviewedToday, reviewedToday + due.length) : 100, done: due.length === 0, icon: 'review' },
@@ -805,12 +924,17 @@
           <h3>${learnedToday >= goal ? '今日份的词汇，<span>已经拾好。</span>' : `今天还有 <span>${Math.max(0, goal - learnedToday)}</span> 个新词，<br>等你拾起。`}</h3>
           <p>${due.length ? `有 ${due.length} 个词到了复习时间。先温故，再知新，记忆会更牢。` : '没有到期的复习，正好轻装上路。每天一点点，词汇会自己长成森林。'}</p>
           <div class="hero-actions">
-            <button class="btn btn-primary" data-action="start-session"><svg><use href="#i-play"/></svg>开始今日学习</button>
+            <button class="btn btn-primary" data-action="${pending ? 'resume-session' : 'start-session'}"><svg><use href="#i-play"/></svg>${startLabel}</button>
             <button class="btn btn-ghost" data-action="open-spell"><svg><use href="#i-keyboard"/></svg>听写挑战</button>
           </div>
+          ${pending ? `<button class="resume-note" data-action="discard-session">留下一组没学完（${pending.remaining} 个），点这里放弃</button>` : ''}
         </div>
         <div class="hero-side">
           <div class="progress-ring" style="--p:${p}">
+            <svg class="ring-svg" viewBox="0 0 120 120" aria-hidden="true">
+              <circle class="ring-track" cx="60" cy="60" r="54"></circle>
+              <circle class="ring-progress" cx="60" cy="60" r="54" style="--circ:339.3;--offset:${ringOffset}"></circle>
+            </svg>
             <div class="ring-inner"><strong>${learnedToday}</strong><span>/ ${goal}</span></div>
           </div>
           <div class="pill">${p >= 100 ? '今日目标完成' : `今日 ${p}%`}</div>
@@ -820,17 +944,10 @@
       <div class="dash-grid">
         <div class="card card-pad">
           <div class="card-head">
-            <h3>复习与坚持</h3>
+            <h3>学习进度</h3>
             <span class="pill ${due.length ? 'pill-coral' : 'pill-accent'}">${due.length ? `${due.length} 个待复习` : '记忆很新鲜'}</span>
           </div>
-          <div class="continue-card">
-            <div class="continue-word">
-              <strong>${due.length ? '先把到期的词过一遍' : '今天没有到期复习'}</strong>
-              <span>${due.length ? `最早到期的词在等你，预计 ${Math.max(2, Math.ceil(due.length * 0.35))} 分钟。` : '可以去词库认识一些新朋友。'}</span>
-            </div>
-            <button class="btn btn-sm ${due.length ? 'btn-coral' : 'btn-soft'}" data-action="${due.length ? 'start-review' : 'go-library'}">${due.length ? '去复习' : '逛词库'}<svg><use href="#i-arrow"/></svg></button>
-          </div>
-          <div class="stat-strip">
+          <div class="stat-strip" style="margin-top:0">
             <div class="stat-cell"><strong>${learnedTotal}</strong><span>已学单词</span></div>
             <div class="stat-cell"><strong>${mastered}</strong><span>已掌握</span></div>
             <div class="stat-cell"><strong>${streak}</strong><span>连续天数</span></div>
@@ -838,6 +955,7 @@
           <div class="week-row">
             ${week.map(d => `<div class="week-day"><span>${d.label}</span><div class="week-dot ${d.done ? 'is-done' : ''} ${d.today ? 'is-today' : ''}">${d.done ? '<svg><use href="#i-check"/></svg>' : ''}</div></div>`).join('')}
           </div>
+          <a href="#/stats" class="text-link" style="margin-top:14px;display:inline-flex">查看完整统计<svg><use href="#i-arrow"/></svg></a>
         </div>
 
         <div class="quote-card">
@@ -847,25 +965,7 @@
         </div>
       </div>
 
-      <div class="dash-grid" style="margin-top:20px">
-        <div class="card card-pad">
-          <div class="card-head">
-            <h3>继续上次</h3>
-            <a href="#/library" class="text-link">全部词库<svg><use href="#i-arrow"/></svg></a>
-          </div>
-          <div class="word-of-day">
-            <div class="wod-copy">
-              <div class="word-display">${esc(continueWord.w)}</div>
-              <div class="phonetic">${esc(continueWord.ph || '点击喇叭听发音')}<button class="speak-btn" data-action="audio" data-word="${esc(continueWord.w)}" aria-label="朗读 ${esc(continueWord.w)}"><svg><use href="#i-volume"/></svg></button></div>
-              <p>${esc(continueWord.tr)}</p>
-            </div>
-            <div class="wod-side">
-              <span class="pill ${statusInfo(continueWord).key === 'new' ? 'pill-accent' : 'pill-gold'}">${statusInfo(continueWord).label}</span>
-              <button class="btn btn-sm btn-soft" data-action="open-word" data-id="${esc(continueWord.id)}">看详情<svg><use href="#i-arrow"/></svg></button>
-            </div>
-          </div>
-        </div>
-
+      <section class="today-row">
         <div class="card card-pad">
           <div class="card-head">
             <h3>今日小目标</h3>
@@ -880,18 +980,19 @@
               </div>`).join('')}
           </div>
         </div>
-      </div>
 
-      <div class="section-head"><div><h2>今日一词</h2><p>不赶路，先把一个词看仔细。</p></div><a href="#/library">去词库<svg><use href="#i-arrow"/></svg></a></div>
-      <section class="word-of-day">
-        <div class="wod-copy">
-          <div class="word-display small">${esc(wordOfDay.w)}</div>
-          <div class="phonetic">${esc(wordOfDay.ph || '')}<button class="speak-btn" data-action="audio" data-word="${esc(wordOfDay.w)}" aria-label="朗读"><svg><use href="#i-volume"/></svg></button></div>
-          <p>${esc(wordOfDay.tr)}</p>
-        </div>
-        <div class="wod-side">
-          <span class="pill">${wordOfDay.phrase ? '短语' : wordOfDay.proper ? '专有名词' : '核心词'}</span>
-          <button class="btn btn-sm btn-ghost" data-action="open-word" data-id="${esc(wordOfDay.id)}">展开<svg><use href="#i-arrow"/></svg></button>
+        <div class="card card-pad">
+          <div class="card-head"><h3>今天从哪开始</h3><span class="pill">NEXT</span></div>
+          <div class="next-word">
+            <div class="next-word-main">
+              <div class="word-display small">${esc((resumeWord || due[0] || wordOfDay).w)}</div>
+              <div class="phonetic">${esc((resumeWord || due[0] || wordOfDay).ph || '')}<button class="speak-btn" data-action="audio" data-word="${esc((resumeWord || due[0] || wordOfDay).w)}" aria-label="朗读"><svg><use href="#i-volume"/></svg></button></div>
+              <p>${esc((resumeWord || due[0] || wordOfDay).tr)}</p>
+            </div>
+            <span class="pill ${pending ? 'pill-accent' : due.length ? 'pill-coral' : ''}">${pending ? '未学完' : due.length ? '待复习' : '新词'}</span>
+          </div>
+          <p class="next-note">${pending ? `上一组还剩 ${pending.remaining} 个，点上面的按钮接着学。` : due.length ? `有 ${due.length} 个词到期，开始学习会先复习它们。` : '今天没有到期复习，开始学习会认识新词。'}</p>
+          <a href="#/library" class="text-link">去词库看看<svg><use href="#i-arrow"/></svg></a>
         </div>
       </section>
     `;
@@ -902,17 +1003,20 @@
 /* ---------------- Library ---------------- */
   function renderLibrary() {
     const active = state.profile.book;
+    const books = customBooks();
     const allCounts = {
       junior: WORDS.filter(w => w.levels.includes('junior')).length,
       senior: WORDS.filter(w => w.levels.includes('senior')).length,
       zhuanshengben: WORDS.filter(w => w.levels.includes('zhuanshengben')).length,
-      all: WORDS.length,
+      all: allWords().length,
     };
+    const activeCount = bookWords(active).length;
+    const isCustom = !!books[active];
     return `
       <div class="page-head">
         <div>
           <h2>词库</h2>
-          <p>${allCounts[active]} 个词，来自初中、高中教材与统招专升本整合词表。先认识，再慢慢处熟。${active === 'zhuanshengben' ? ` 当前为统招专升本整合词表（${allCounts.zhuanshengben} 词）。` : ''}</p>
+          <p>${activeCount} 个词，来自初中、高中教材与统招专升本整合词表。先认识，再慢慢处熟。${isCustom ? ` 当前为自定义词库「${esc(books[active].label || '我的词库')}」。` : active === 'zhuanshengben' ? ` 当前为统招专升本整合词表（${allCounts.zhuanshengben} 词）。` : ''}</p>
         </div>
         <div class="page-head-actions">
           <button class="btn btn-ghost btn-sm" data-action="open-spell"><svg><use href="#i-keyboard"/></svg>听写</button>
@@ -925,6 +1029,8 @@
         <button class="book-tab ${active === 'senior' ? 'is-active' : ''}" data-action="set-book" data-book="senior">高中 <small>${allCounts.senior}</small></button>
         <button class="book-tab ${active === 'zhuanshengben' ? 'is-active' : ''}" data-action="set-book" data-book="zhuanshengben">专升本 <small>${allCounts.zhuanshengben}</small></button>
         <button class="book-tab ${active === 'all' ? 'is-active' : ''}" data-action="set-book" data-book="all">全部 <small>${allCounts.all}</small></button>
+        ${Object.entries(books).map(([key, book]) => `<button class="book-tab ${active === key ? 'is-active' : ''}" data-action="set-book" data-book="${esc(key)}">${esc((book.label || '我的词库').slice(0, 6))} <small>${(book.words || []).length}</small></button>`).join('')}
+        <button class="book-tab book-tab-add" data-action="open-book-import">＋ 导入</button>
       </div>
 
       <div class="library-toolbar">
@@ -974,13 +1080,14 @@
       <div class="word-list">
         ${shown.map(w => {
           const st = statusInfo(w);
-          return `<div class="word-row" data-action="open-word" data-id="${esc(w.id)}" role="button" tabindex="0">
+          return `<div class="word-row" data-action="select-word" data-id="${esc(w.id)}" role="button" tabindex="0" aria-label="${esc(w.w)}">
             <div class="w">${searchMark(w.w, ui.libraryQuery.trim())}</div>
             <div class="p">${esc(w.ph || '—')}</div>
             <div class="t">${searchMark(w.tr, ui.libraryQuery.trim())}</div>
             <div class="meta">
               <span class="status-dot ${st.dot}"></span>
               <span class="pill ${st.key === 'review' ? 'pill-coral' : st.key === 'mastered' ? 'pill-accent' : ''}">${st.label}</span>
+              <button class="row-detail" data-action="open-word" data-id="${esc(w.id)}" aria-label="查看 ${esc(w.w)} 详情"><svg><use href="#i-chevron"/></svg></button>
               <button class="row-star ${isFavorite(w.id) ? 'is-on' : ''}" data-action="toggle-favorite" data-id="${esc(w.id)}" aria-label="收藏 ${esc(w.w)}"><svg><use href="#i-star"/></svg></button>
             </div>
           </div>`;
@@ -1010,6 +1117,11 @@
     }
     const max = Math.max(1, ...upcoming.map(u => u.n));
     const overdue = due.filter(w => progressOf(w.id).due < today).length;
+    const learnedCount = Object.keys(state.progress).length;
+    const learningCount = Object.values(state.progress).filter(p => p.status === 'learning').length;
+    const totalReviews = state.stats.totalReviews || 0;
+    const graded = (state.stats.correct || 0) + (state.stats.wrong || 0);
+    const accuracy = graded ? pct(state.stats.correct, graded) : 0;
     return `
       <div class="page-head">
         <div><h2>复习</h2><p>记忆不是一次完成的，是在快忘记的时候，再见一面。</p></div>
@@ -1031,6 +1143,30 @@
             <svg class="chev"><use href="#i-chevron"/></svg>
           </a>
         </div>
+      </section>
+
+      <section class="card card-pad review-summary" style="margin-top:20px">
+        <div class="card-head"><h3>复习统计</h3><span class="pill">记忆进度</span></div>
+        <div class="review-stats">
+          <div class="review-stat"><strong>${learnedCount}</strong><span>已学单词</span></div>
+          <div class="review-stat"><strong>${learningCount}</strong><span>学习中</span></div>
+          <div class="review-stat"><strong>${stats.reviewing}</strong><span>待复习</span></div>
+          <div class="review-stat"><strong>${stats.mastered}</strong><span>已掌握</span></div>
+          <div class="review-stat"><strong>${accuracy}<i>%</i></strong><span>复习正确率</span></div>
+          <div class="review-stat"><strong>${totalReviews}</strong><span>累计复习次数</span></div>
+        </div>
+        <a href="#/stats" class="text-link" style="margin-top:14px;display:inline-flex">查看每个学过的词<svg><use href="#i-arrow"/></svg></a>
+      </section>
+
+      <section class="card card-pad" style="margin-top:20px">
+        <div class="card-head"><h3>听写方式</h3><span class="pill">三种模式</span></div>
+        <div class="segmented segmented-lg spell-mode-pick">
+          <button class="${state.spellMode === 'word' ? 'is-on' : ''}" data-action="spell-mode" data-mode="word">显示单词</button>
+          <button class="${state.spellMode === 'meaning' ? 'is-on' : ''}" data-action="spell-mode" data-mode="meaning">显示词义</button>
+          <button class="${state.spellMode === 'audio' ? 'is-on' : ''}" data-action="spell-mode" data-mode="audio">只听发音</button>
+        </div>
+        <p class="curve-note">当前：${{ word: '显示单词写单词', meaning: '看中文释义写单词', audio: '只听发音写单词' }[state.spellMode || 'word']}。</p>
+        <button class="btn btn-soft" style="margin-top:12px" data-action="open-spell"><svg><use href="#i-keyboard"/></svg>开始听写</button>
       </section>
 
       <div class="dash-grid" style="margin-top:20px">
@@ -1057,7 +1193,7 @@
       <div class="section-head"><div><h2>到期的词</h2><p>${due.length ? '从最早到期的开始。' : '今天已经清空了。'}</p></div>${due.length ? '<button class="text-link" data-action="start-review">全部复习<svg><use href="#i-arrow"/></svg></button>' : ''}</div>
       ${due.length ? `<div class="due-list">${due.slice(0, 12).map(w => {
         const p = progressOf(w.id);
-        return `<div class="due-item" data-action="open-word" data-id="${esc(w.id)}" role="button" tabindex="0"><span class="w">${esc(w.w)}</span><span class="t">${esc(w.tr)}</span><span class="due">${esc(reviewWhen(w))}</span><span class="status-dot ${p && p.due < today ? 'review' : ''}"></span></div>`;
+        return `<div class="due-item" data-action="select-word" data-id="${esc(w.id)}" role="button" tabindex="0"><span class="w">${esc(w.w)}</span><span class="t">${esc(w.tr)}</span><span class="due">${esc(reviewWhen(w))}</span><span class="status-dot ${p && p.due < today ? 'review' : ''}"></span><button class="row-detail" data-action="open-word" data-id="${esc(w.id)}" aria-label="查看 ${esc(w.w)} 详情"><svg><use href="#i-chevron"/></svg></button></div>`;
       }).join('')}${due.length > 12 ? `<div class="due-item" style="justify-content:center;color:var(--muted);font-size:11px" data-action="start-review">还有 ${due.length - 12} 个，开始复习 →</div>` : ''}</div>` : `<div class="empty-state"><div class="empty-art"><svg><use href="#i-check"/></svg></div><h3>今天没有到期单词</h3><p>可以去词库认识新词，或者做一组听写，让记忆保持温度。</p><button class="btn btn-soft btn-sm" data-action="start-extra">学 10 个新词</button></div>`}
     `;
   }
@@ -1071,9 +1207,33 @@
 
 /* ===== 11-page-stats.js ===== */
 /* ---------------- Stats ---------------- */
+  const STATS_PAGE_SIZE = 30;
+
+  function learnedWordList() {
+    const items = [];
+    for (const [id, p] of Object.entries(state.progress)) {
+      const w = WORD_BY_ID.get(id);
+      if (!w) continue;
+      items.push({ w, p, at: Date.parse(p.last || p.first || '') || 0 });
+    }
+    items.sort((a, b) => b.at - a.at);
+    return items;
+  }
+
+  function setSpellMode(mode) {
+    if (!['word', 'meaning', 'audio'].includes(mode)) return;
+    state.spellMode = mode;
+    save();
+    renderRoute();
+    const label = { word: '看单词写单词', meaning: '看释义写单词', audio: '只听发音写单词' }[mode];
+    toast(`听写模式：${label}`, 'keyboard');
+  }
+
   function renderStats() {
     const progress = state.progress;
     const ids = Object.keys(progress);
+    const learnedList = learnedWordList();
+    const shown = Math.max(STATS_PAGE_SIZE, (ui.statsPage || 1) * STATS_PAGE_SIZE);
     const learned = ids.length;
     const mastered = ids.filter(id => progress[id].status === 'mastered').length;
     const learning = ids.filter(id => progress[id].status === 'learning').length;
@@ -1140,6 +1300,19 @@
         </div>
       </div>
 
+      <div class="section-head"><div><h2>学过的单词</h2><p>${learnedList.length ? `共 ${learnedList.length} 个，最近的排在前面。` : '还没有学过的词。'}</p></div></div>
+      ${learnedList.length ? `<div class="card learned-card">
+        <div class="learned-list">
+          ${learnedList.slice(0, shown).map(({ w, p }) => `
+            <div class="learned-item" data-action="select-word" data-id="${esc(w.id)}" role="button" tabindex="0">
+              <span class="w">${esc(w.w)}</span>
+              <span class="t">${esc(w.tr)}</span>
+              <button class="row-detail" data-action="open-word" data-id="${esc(w.id)}" aria-label="查看 ${esc(w.w)} 详情"><svg><use href="#i-chevron"/></svg></button>
+            </div>`).join('')}
+        </div>
+        ${learnedList.length > shown ? `<button class="btn btn-sm btn-soft learned-more" data-action="stats-more">再看 ${Math.min(STATS_PAGE_SIZE, learnedList.length - shown)} 个</button>` : ''}
+      </div>` : ''}
+
       <div class="section-head"><div><h2>小小的纪念</h2><p>不着急，慢慢收集。</p></div></div>
       <div class="achievements">${achievements.map(a => `<div class="achv ${a.on ? 'is-on' : ''}"><div class="achv-icon"><svg><use href="#i-${a.icon}"/></svg></div><strong>${a.title}</strong><span>${a.desc}</span></div>`).join('')}</div>
     `;
@@ -1168,6 +1341,8 @@
 /* ---------------- Settings ---------------- */
   function renderSettings() {
     const goal = state.profile.dailyGoal;
+    const books = customBooks();
+    const bookList = Object.entries(books);
     return `
       <div class="page-head"><div><h2>设置</h2><p>把学习调成你舒服的节奏。所有进度都保存在这台设备上。</p></div></div>
       <div class="settings-grid">
@@ -1190,6 +1365,18 @@
               <button class="${state.profile.book === 'all' ? 'is-on' : ''}" data-action="set-book" data-book="all">全部</button>
             </div>
           </div>
+          <div class="setting-row">
+            <div class="label"><strong>自定义词库</strong><span>导入自己的单词表，导入后自动切换过去。</span></div>
+            <button class="btn btn-sm btn-soft" data-action="open-book-import"><svg><use href="#i-upload"/></svg>导入</button>
+          </div>
+          ${bookList.length ? `<div class="book-list">${bookList.map(([key, book]) => `
+            <div class="book-item ${state.profile.book === key ? 'is-on' : ''}">
+              <div><strong>${esc(book.label || '我的词库')}</strong><span>${(book.words || []).length} 个词</span></div>
+              <div class="book-item-actions">
+                <button class="btn btn-xs btn-ghost" data-action="set-book" data-book="${esc(key)}">${state.profile.book === key ? '使用中' : '切换'}</button>
+                <button class="btn btn-xs btn-ghost" data-action="delete-book" data-book="${esc(key)}">删除</button>
+              </div>
+            </div>`).join('')}</div>` : ''}
           <div class="setting-row">
             <div class="label"><strong>自动朗读</strong><span>显示单词时自动播放发音。</span></div>
             <label class="switch"><input type="checkbox" id="auto-speak" ${state.profile.autoSpeak ? 'checked' : ''}><span></span></label>
@@ -1347,11 +1534,12 @@
             const p = progressOf(w.id);
             const lapses = p?.lapses || 0;
             const label = lapses > 0 ? `错 ${lapses} 次` : '刚刚标记不认识';
-            return `<div class="due-item" data-action="open-word" data-id="${esc(w.id)}" role="button" tabindex="0">
+            return `<div class="due-item" data-action="select-word" data-id="${esc(w.id)}" role="button" tabindex="0">
               <span class="w">${esc(w.w)}</span>
               <span class="t">${esc(w.tr)}</span>
               <span class="due">${label} · ${esc(reviewWhen(w))}</span>
               <span class="status-dot review"></span>
+              <button class="row-detail" data-action="open-word" data-id="${esc(w.id)}" aria-label="查看 ${esc(w.w)} 详情"><svg><use href="#i-chevron"/></svg></button>
               <button class="mistake-remove" data-action="remove-mistake" data-id="${esc(w.id)}" aria-label="把 ${esc(w.w)} 移出错词本" title="移出错词本"><svg><use href="#i-trash"/></svg></button>
             </div>`;
           }).join('')}
@@ -1496,6 +1684,7 @@
       skipped: new Set(),
       mode,
     };
+    persistSession();
     document.body.style.overflow = 'hidden';
     renderSession();
     document.addEventListener('keydown', onSessionKey);
@@ -1586,12 +1775,49 @@
     `;
   }
 
+  /**
+   * Reveal in place: swap only the card body and the grade bar instead of
+   * re-rendering the whole overlay. Re-rendering looked like a page jump and
+   * also replayed the entry animation on every tap.
+   */
   function revealCard() {
-    if (!ui.session || ui.session.revealed) return;
-    ui.session.revealed = true;
-    renderSession();
-    const w = currentWord();
-    if (w && state.profile.autoSpeak) speak(w.w);
+    const s = ui.session;
+    if (!s || s.revealed) return;
+    s.revealed = true;
+    const item = s.queue[s.index];
+    const w = item ? WORD_BY_ID.get(item.id) : null;
+    if (!w) { renderSession(); return; }
+
+    const card = document.querySelector('.study-card');
+    const body = card?.querySelector('.study-card-body');
+    const display = card?.querySelector('.word-display');
+    if (body) {
+      display?.classList.add('small');
+      const example = w.example;
+      body.innerHTML = `
+        <div class="word-display small">${esc(w.w)}</div>
+        <div class="phonetic" style="margin-top:10px">${esc(w.ph || '点击喇叭听发音')}<button class="speak-btn" data-action="audio" data-word="${esc(w.w)}" aria-label="朗读"><svg><use href="#i-volume"/></svg></button></div>
+        <div class="meaning-block">
+          <div class="translation">${esc(w.tr)}</div>
+          ${example ? `<div class="example"><div class="en">${esc(example[0])}</div><div class="zh">${esc(example[1])}</div></div>` : `<div class="example"><div class="en" style="color:var(--muted);font-size:13px">试着用它造一个句子，记忆会更深。</div></div>`}
+        </div>
+      `;
+      card?.classList.add('is-revealed');
+      const bar = document.querySelector('.grade-bar');
+      if (bar) {
+        bar.innerHTML = `
+          <button class="grade-btn again" data-action="grade" data-grade="0"><strong>不认识</strong><span>重新记一次</span><kbd>1</kbd></button>
+          <button class="grade-btn hard" data-action="grade" data-grade="1"><strong>有点模糊</strong><span>很快再见</span><kbd>2</kbd></button>
+          <button class="grade-btn good" data-action="grade" data-grade="2"><strong>认识</strong><span>继续向前</span><kbd>3</kbd></button>`;
+        bar.classList.add('is-ready');
+      }
+      const hint = document.querySelector('.study-hint');
+      if (hint) hint.innerHTML = `<kbd>Space</kbd> 选择熟悉程度 <span style="opacity:.5">·</span> <kbd>Esc</kbd> 退出`;
+    } else {
+      renderSession();
+      return;
+    }
+    if (state.profile.autoSpeak) speak(w.w);
   }
 
   function gradeCurrent(grade) {
@@ -1609,10 +1835,72 @@
     }
     s.index++;
     s.revealed = false;
+    persistSession();
     if (s.index >= s.queue.length) { renderSummary(); return; }
-    renderSession();
+    advanceInPlace(grade);
     const next = currentWord();
     if (next && state.profile.autoSpeak) setTimeout(() => speak(next.w), 280);
+  }
+
+  /**
+   * Move to the next word without rebuilding the overlay: update the card
+   * contents, the progress track and the counter in place.
+   */
+  function advanceInPlace(lastGrade) {
+    const s = ui.session;
+    if (!s) return;
+    const item = s.queue[s.index];
+    const w = item ? WORD_BY_ID.get(item.id) : null;
+    const card = document.querySelector('.study-card');
+    const body = card?.querySelector('.study-card-body');
+    if (!w || !body) { renderSession(); return; }
+
+    const isReview = item.type === 'review' || !!progressOf(w.id);
+    const progress = Math.round((s.index / s.queue.length) * 100);
+    const track = document.querySelector('.study-track i');
+    if (track) track.style.width = `${progress}%`;
+    const pctEl = document.querySelector('.study-progress-head span:last-child');
+    if (pctEl) pctEl.textContent = `${progress}%`;
+    const countEl = document.querySelector('.study-count');
+    if (countEl) countEl.innerHTML = `${pad(s.index + 1)} <small>/ ${pad(s.queue.length)}</small>`;
+    const labelEl = document.querySelector('.study-progress-head span:first-child');
+    if (labelEl) labelEl.textContent = `${isReview ? 'REVIEW' : 'NEW WORDS'} · ${bookLabel(state.profile.book)}`;
+
+    const badges = card.querySelector('.study-badges');
+    if (badges) {
+      badges.innerHTML = `<span class="pill ${isReview ? 'review' : ''}">${isReview ? '复习' : '新词'}</span>
+        <span class="pill">${w.phrase ? '短语' : w.proper ? '专有名词' : '核心词'}</span>`;
+    }
+    const whenEl = card.querySelector('.study-card-top > .pill:last-child');
+    if (whenEl) whenEl.textContent = isReview ? reviewWhen(w) : '第一次见面';
+    const favBtn = card.querySelector('.fav-btn[data-action="toggle-favorite"]');
+    if (favBtn) {
+      favBtn.dataset.id = w.id;
+      favBtn.classList.toggle('is-on', isFavorite(w.id));
+    }
+    card.querySelectorAll('[data-action="audio"]').forEach(btn => { btn.dataset.word = w.w; });
+    card.classList.remove('is-revealed');
+    const display = card.querySelector('.word-display');
+    if (display) display.classList.remove('small');
+    body.innerHTML = `
+      <div class="word-display">${esc(w.w)}</div>
+      <div class="phonetic" style="margin-top:10px">${esc(w.ph || '点击喇叭听发音')}<button class="speak-btn" data-action="audio" data-word="${esc(w.w)}" aria-label="朗读"><svg><use href="#i-volume"/></svg></button></div>
+      <div class="reveal-hint" style="margin-top:28px">
+        <div class="tap-line"><svg><use href="#i-arrow"/></svg></div>
+        <span>点击卡片，查看释义</span>
+      </div>
+    `;
+    const bar = document.querySelector('.grade-bar');
+    if (bar) {
+      bar.classList.remove('is-ready');
+      bar.innerHTML = `<button class="grade-btn" disabled style="grid-column:1/-1;opacity:.55"><strong>先回忆一下，再翻开卡片</strong><span>主动回忆比直接看答案更有效</span></button>`;
+    }
+    const hint = document.querySelector('.study-hint');
+    if (hint) hint.innerHTML = `<kbd>Space</kbd> 显示释义 <span style="opacity:.5">·</span> <kbd>Esc</kbd> 退出`;
+    if (lastGrade === 0) {
+      const stage = card.querySelector('.study-stage');
+      if (stage) { stage.classList.add('lapse-flash'); setTimeout(() => stage.classList.remove('lapse-flash'), 420); }
+    }
   }
 
   function recordSessionTime(session) {
@@ -1635,6 +1923,7 @@
     s.skipped.add(item.id);
     s.index += 1;
     s.revealed = false;
+    persistSession();
     if (s.index >= s.queue.length) { renderSummary(); return; }
     renderSession();
     if (state.profile.autoSpeak) {
@@ -1646,9 +1935,72 @@
     }
   }
 
+  /* Persist the current queue so leaving the app mid-study can be resumed. */
+  function persistSession() {
+    const s = ui.session;
+    if (!s) { state.session = null; debounceSave(); return; }
+    const remaining = s.index >= s.queue.length ? 0 : s.queue.length - s.index;
+    if (!remaining) { state.session = null; save(); return; }
+    state.session = {
+      mode: s.mode,
+      queue: s.queue.map(item => ({ id: item.id, type: item.type })),
+      index: s.index,
+      results: s.results.slice(-200),
+      requeued: [...s.requeued],
+      skipped: [...s.skipped],
+      book: state.profile.book,
+      savedAt: Date.now(),
+    };
+    save();
+  }
+
+  function pendingSession() {
+    const saved = state.session;
+    if (!saved || !Array.isArray(saved.queue) || !saved.queue.length) return null;
+    const index = clamp(Number(saved.index) || 0, 0, saved.queue.length);
+    if (index >= saved.queue.length) return null;
+    const fresh = saved.queue.slice(index).filter(item => item && WORD_BY_ID.has(item.id));
+    if (!fresh.length) return null;
+    return { saved, fresh, remaining: fresh.length, total: saved.queue.length, index };
+  }
+
+  function resumeSession() {
+    const pending = pendingSession();
+    if (!pending) {
+      state.session = null;
+      save();
+      return false;
+    }
+    const { saved, fresh } = pending;
+    closeModal();
+    ui.session = {
+      queue: fresh.map(item => ({ id: item.id, type: item.type })),
+      index: 0,
+      revealed: false,
+      results: Array.isArray(saved.results) ? saved.results.slice() : [],
+      start: Date.now(),
+      requeued: new Set(Array.isArray(saved.requeued) ? saved.requeued : []),
+      skipped: new Set(Array.isArray(saved.skipped) ? saved.skipped : []),
+      mode: saved.mode || 'mixed',
+      resumed: true,
+    };
+    document.body.style.overflow = 'hidden';
+    renderSession();
+    document.addEventListener('keydown', onSessionKey);
+    if (state.profile.autoSpeak) {
+      setTimeout(() => {
+        if (!ui.session) return;
+        const w = currentWord();
+        if (w) speak(w.w);
+      }, 320);
+    }
+    return true;
+  }
+
   function closeSession() {
     if (!ui.session) return;
     recordSessionTime(ui.session);
+    persistSession();
     ui.session = null;
     document.removeEventListener('keydown', onSessionKey);
     overlayEl.innerHTML = '';
@@ -1687,6 +2039,8 @@
     const accuracy = results.length ? pct(correct, results.length) : 0;
     const words = uniqBy(results.map(r => WORD_BY_ID.get(r.id)).filter(Boolean), w => w.id);
     recordSessionTime(s);
+    state.session = null;
+    save();
     const minutes = Math.max(1, Math.round((s.elapsedSeconds || 0) / 60));
     const nextLabel = words[0] ? reviewWhen(words[0]) : '稍后';
     overlayEl.innerHTML = `
@@ -1733,21 +2087,36 @@
     pool = uniqBy(pool, w => w.id).filter(w => /^[A-Za-z][A-Za-z'\- ]*$/.test(w.w));
     if (!pool.length) { toast('先学几个词，再来听写吧', 'book'); return; }
     const queue = shuffle(pool).slice(0, 10);
-    ui.spell = { queue, index: 0, score: 0, answered: false, answer: '' };
+    ui.spell = { queue, index: 0, score: 0, answered: false, answer: '', mode: state.spellMode || 'word' };
     renderSpellModal();
-    setTimeout(() => { speak(queue[0].w); const input = document.getElementById('spell-input'); if (input) input.focus(); }, 320);
+    setTimeout(() => {
+      speak(queue[0].w);
+      const input = document.getElementById('spell-input');
+      if (input) input.focus();
+    }, 320);
   }
+
+  const SPELL_MODE_INFO = {
+    word: { title: '看单词，写单词', tip: '照着上面的单词拼写一遍，练手感。', showWord: true },
+    meaning: { title: '看释义，写单词', tip: '根据中文释义回忆单词。', showWord: false },
+    audio: { title: '只听发音，写单词', tip: '听发音，把单词写出来。', showWord: false },
+  };
 
   function renderSpellModal() {
     const s = ui.spell;
     if (!s) return;
     if (s.index >= s.queue.length) { renderSpellResult(); return; }
     const w = s.queue[s.index];
+    const mode = SPELL_MODE_INFO[s.mode] || SPELL_MODE_INFO.word;
     openModal(`
       <div class="modal-backdrop" data-action="backdrop">
         <div class="modal-card spell-card" role="dialog" aria-modal="true" aria-label="听写挑战">
           <button class="icon-btn modal-close" data-action="close-modal" aria-label="关闭"><svg><use href="#i-close"/></svg></button>
-          <div class="modal-head" style="text-align:center;padding-right:0"><div class="eyebrow">LISTEN &amp; SPELL</div><h2>听写小挑战</h2><p>听发音，把单词写出来。</p></div>
+          <div class="modal-head" style="text-align:center;padding-right:0"><div class="eyebrow">SPELL &amp; RECALL</div><h2>${mode.title}</h2><p>${mode.tip}</p></div>
+          <div class="spell-mode-row">
+            ${[['word', '显示单词'], ['meaning', '显示词义'], ['audio', '只听发音']].map(([key, label]) => `<button class="spell-mode-chip ${s.mode === key ? 'is-on' : ''}" data-action="spell-mode" data-mode="${key}">${label}</button>`).join('')}
+          </div>
+          ${mode.showWord ? `<div class="spell-word">${esc(w.w)}</div>` : s.mode === 'meaning' ? `<div class="spell-meaning">${esc(w.tr)}</div>` : ''}
           <button class="spell-audio" data-action="spell-play" aria-label="再听一次"><svg><use href="#i-volume"/></svg></button>
           <p class="spell-hint">第 ${s.index + 1} / ${s.queue.length} 个 · 点击喇叭可以再听一次</p>
           <input class="spell-input" id="spell-input" value="${esc(s.answer || '')}" placeholder="输入听到的单词" autocomplete="off" autocapitalize="off" spellcheck="false" ${s.answered ? 'disabled' : ''}>
@@ -1804,7 +2173,7 @@
     s.answer = '';
     if (s.index >= s.queue.length) { renderSpellResult(); return; }
     renderSpellModal();
-    setTimeout(() => speak(s.queue[s.index].w), 240);
+    if (s.mode !== 'word') setTimeout(() => speak(s.queue[s.index].w), 240);
   }
 
   function renderSpellResult() {
@@ -1832,9 +2201,19 @@
   }
 
   function restartSpell() {
-    const old = ui.spell;
     ui.spell = null;
     openSpell();
+  }
+
+  function switchSpellMode(mode) {
+    const s = ui.spell;
+    if (!SPELL_MODE_INFO[mode]) return;
+    state.spellMode = mode;
+    save();
+    if (!s) { renderRoute(); return; }
+    s.mode = mode;
+    renderSpellModal();
+    if (mode !== 'word') setTimeout(() => speak(s.queue[s.index].w), 200);
   }
 
 
@@ -1961,12 +2340,12 @@
 
   function setBook(book) {
     if (!book || !BOOK_LABELS[book]) return;
+    if (state.profile.book === book) return;
     state.profile.book = book;
     ui.libraryPage = 1;
     save();
     topbar();
     renderRoute();
-    toast(`已切换到${bookLabel(book)}`, 'book');
   }
 
   function toggleTheme() {
@@ -2023,6 +2402,114 @@
     };
     reader.readAsText(file);
     e.target.value = '';
+  }
+
+  /* -------- Custom wordbook import -------- */
+  function parseBookText(text) {
+    const out = [];
+    const seen = new Set();
+    const rows = String(text || '').split(/\r?\n/);
+    for (const line of rows) {
+      const raw = line.trim();
+      if (!raw || raw.startsWith('#')) continue;
+      let w = '';
+      let tr = '';
+      let ph = '';
+      // Tab / comma separated: apple \t 苹果 \t ˈæpl
+      const cells = raw.split(/\t|,|，|\|/).map(s => s.trim()).filter(Boolean);
+      if (cells.length >= 2) {
+        w = cells[0];
+        if (/^[\/\[]?[a-zˈˌːəɪʊɔæʌθðʃʒŋŋ'‑\- ]+[\/\]]?$/i.test(cells[1]) && cells[2]) {
+          ph = cells[1].replace(/^[\/\[]|[\/\]]$/g, '');
+          tr = cells[2];
+        } else {
+          tr = cells[1];
+          ph = (cells[2] || '').replace(/^[\/\[]|[\/\]]$/g, '');
+        }
+      } else {
+        // Whitespace: "apple 苹果"
+        const m = raw.match(/^(\S+)\s+(.+)$/);
+        if (!m) continue;
+        w = m[1];
+        tr = m[2];
+      }
+      w = w.replace(/^[\s*\-•\d.、]+/, '').trim();
+      if (!/^[A-Za-z][A-Za-z'\- ]{0,38}$/.test(w)) continue;
+      const key = w.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ w, ph: ph.slice(0, 40), tr: tr.slice(0, 120) });
+      if (out.length >= 5000) break;
+    }
+    return out;
+  }
+
+  function openBookImport() {
+    openModal(`
+      <div class="modal-backdrop" data-action="backdrop">
+        <div class="modal-card" role="dialog" aria-modal="true" aria-label="导入自定义词库">
+          <button class="icon-btn modal-close" data-action="close-modal" aria-label="关闭"><svg><use href="#i-close"/></svg></button>
+          <div class="modal-head"><div class="eyebrow">CUSTOM WORDS</div><h2>导入自己的词库</h2><p>支持纯文本（.txt）或 CSV：每行一个词，用 Tab、逗号或空格分隔。</p></div>
+          <pre class="book-sample">apple	苹果	ˈæpl
+banjo,班卓琴
+cherry 樱桃</pre>
+          <div class="setting-row">
+            <div class="label"><strong>选择文件</strong><span>.txt / .csv / .md，最多 5,000 个词。</span></div>
+            <button class="btn btn-sm btn-soft" data-action="import-book"><svg><use href="#i-upload"/></svg>选择</button>
+          </div>
+          <input type="file" id="book-file" accept=".txt,.csv,.md,text/plain,text/csv" hidden>
+        </div>
+      </div>
+    `);
+  }
+
+  function onBookFile(e) {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+    if (file.size > 3 * 1024 * 1024) { toast('文件太大了，请控制在 3MB 以内', 'close'); return; }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const words = parseBookText(String(reader.result));
+      if (words.length < 1) { toast('没有识别到单词，检查一下每行的格式', 'close'); return; }
+      const base = (file.name || '我的词库').replace(/\.[^.]+$/, '').slice(0, 16) || '我的词库';
+      let key = `u_${Date.now().toString(36)}`;
+      saveCustomBook(key, base, words);
+      if (!BOOK_LABELS[key]) registerBook(key, { label: base, filter: w => CUSTOM_WORDS.get(w.id)?.custom === key });
+      state.profile.book = key;
+      save();
+      closeModal();
+      topbar();
+      navigate('library');
+      toast(`已导入 ${words.length} 个词到「${base}」`, 'book');
+    };
+    reader.readAsText(file);
+  }
+
+  function deleteCustomBook(key) {
+    if (!state.customBooks || !state.customBooks[key]) return;
+    const label = state.customBooks[key].label || '这个词库';
+    if (!confirm(`删除「${label}」？学习记录会保留在进度里。`)) return;
+    removeCustomBook(key);
+    save();
+    topbar();
+    renderRoute();
+    toast('词库已删除', 'check');
+  }
+
+  function createBookFromText(rawWords, label) {
+    const words = rawWords.filter(w => w && w.w);
+    if (!words.length) return null;
+    const key = `u_${Date.now().toString(36)}`;
+    saveCustomBook(key, label || '我的词库', words);
+    if (!BOOK_LABELS[key]) registerBook(key, { label: label || '我的词库', filter: w => CUSTOM_WORDS.get(w.id)?.custom === key });
+    save();
+    return key;
+  }
+
+  function bookWordsPreview(key) {
+    const book = customBooks()[key];
+    return book ? book.words.length : 0;
   }
 
   function confirmReset() {
@@ -2092,6 +2579,19 @@
     }
     switch (action) {
       case 'start-session': openSession({ mode: 'mixed' }); break;
+      case 'resume-session':
+        if (!resumeSession()) { state.session = null; save(); renderRoute(); }
+        break;
+      case 'discard-session': state.session = null; save(); renderRoute(); toast('已放弃这一组，下次重新开始', 'check'); break;
+      case 'spell-mode':
+        if (ui.spell) switchSpellMode(el.dataset.mode);
+        else setSpellMode(el.dataset.mode);
+        break;
+      case 'import-book': document.getElementById('book-file')?.click(); break;
+      case 'open-book-import': openBookImport(); break;
+      case 'delete-book': deleteCustomBook(el.dataset.book); break;
+      case 'set-filter': ui.libraryFilter = el.dataset.filter; ui.libraryPage = 1; renderRoute(); break;
+      case 'stats-more': ui.statsPage += 1; renderRoute(); break;
       case 'start-review': openSession({ mode: 'review' }); break;
       case 'start-extra': closeSummary(); openSession({ mode: 'extra', extra: 10 }); break;
       case 'open-spell': openSpell(); break;
@@ -2113,6 +2613,7 @@
         applyTheme(); save();
         $$('[data-action="set-theme"]').forEach(btn => btn.classList.toggle('is-on', btn.dataset.theme === state.profile.theme));
         break;
+      case 'select-word': selectWord(el); break;
       case 'open-settings': navigate('settings'); break;
       case 'toggle-nav': toggleSidebar(); break;
       case 'go-library': navigate('library'); break;
@@ -2153,15 +2654,37 @@
     if (actionEl) {
       const action = actionEl.dataset.action;
       if (action === 'backdrop' && e.target !== actionEl) return;
-      if (action === 'toggle-favorite') e.stopPropagation();
+      if (action === 'toggle-favorite' || action === 'select-word') e.stopPropagation();
       e.preventDefault();
       handleAction(action, actionEl, e);
       return;
     }
-    const row = e.target.closest('.word-row, .due-item');
-    if (row && row.dataset.id) { openWordDetail(row.dataset.id); return; }
     const navLink = e.target.closest('a[href^="#/"]');
     if (navLink) toggleSidebar(false);
+  }
+
+  /**
+   * Single tap on a word row only highlights it and shows a small hint.
+   * Opening the detail sheet used to happen on any tap, which felt like the
+   * app was jumping to another screen by accident.
+   */
+  function selectWord(el) {
+    const id = el.dataset.id;
+    const w = WORD_BY_ID.get(id);
+    if (!w) return;
+    $$('.word-row.is-selected, .due-item.is-selected, .learned-item.is-selected')
+      .forEach(row => row.classList.remove('is-selected'));
+    el.classList.add('is-selected');
+    const st = statusInfo(w);
+    toast(`${w.w} · ${st.label} · 点右侧箭头看详情`, 'book');
+  }
+
+  function onRowHold(e) {
+    const row = e.target.closest('.word-row, .due-item, .learned-item');
+    if (!row || !row.dataset.id) return;
+    if (e.target.closest('[data-action]') && !e.target.closest('[data-action="select-word"]')) return;
+    openWordDetail(row.dataset.id);
+    row.classList.remove('is-selected');
   }
 
   function onKeydown(e) {
@@ -2206,6 +2729,10 @@
       ui.libraryFilter = e.target.value;
       ui.libraryPage = 1;
       renderLibraryResults();
+      return;
+    }
+    if (e.target.id === 'book-file') {
+      onBookFile(e);
     }
   }
 
