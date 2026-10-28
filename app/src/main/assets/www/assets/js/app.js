@@ -203,6 +203,7 @@
         accent: 'us',
         theme: 'light',
         shuffle: false,
+        reminder: { enabled: false, time: '20:00', lastFired: '' },
       },
       progress: {},
       favorites: [],
@@ -1181,6 +1182,15 @@
           <h2>${due.length}</h2>
           <p>${due.length ? `个词到了复习时间${overdue ? `，其中 ${overdue} 个已经逾期` : ''}。用几分钟，把它们重新点亮。` : '今天没有到期复习。去认识几个新词，或者做一组听写。'}</p>
           <button class="btn" data-action="${due.length ? 'start-review' : 'start-extra'}"><svg><use href="#i-${due.length ? 'review' : 'spark'}"/></svg>${due.length ? '开始复习' : '学 10 个新词'}</button>
+          <div class="review-spell">
+            <div class="review-spell-label">听写方式</div>
+            <div class="segmented spell-mode-inline">
+              <button class="${state.spellMode === 'word' ? 'is-on' : ''}" data-action="spell-mode" data-mode="word">显示单词</button>
+              <button class="${state.spellMode === 'meaning' ? 'is-on' : ''}" data-action="spell-mode" data-mode="meaning">显示词义</button>
+              <button class="${state.spellMode === 'audio' ? 'is-on' : ''}" data-action="spell-mode" data-mode="audio">只听发音</button>
+            </div>
+            <button class="review-spell-go" data-action="open-spell"><svg><use href="#i-keyboard"/></svg>开始听写</button>
+          </div>
         </div>
         <div class="review-side">
           <div class="review-mini"><div class="mini-icon"><svg><use href="#i-clock"/></svg></div><div><strong>${due.length}</strong><span>今日到期 / 待复习</span></div></div>
@@ -1207,15 +1217,13 @@
         <a href="#/stats" class="text-link" style="margin-top:14px;display:inline-flex">查看每个学过的词<svg><use href="#i-arrow"/></svg></a>
       </section>
 
-      <section class="card card-pad" style="margin-top:20px">
-        <div class="card-head"><h3>听写方式</h3><span class="pill">三种模式</span></div>
+      <section class="card card-pad">
+        <div class="card-head"><h3>听写范围</h3><span class="pill">三种模式</span></div>
         <div class="segmented segmented-lg spell-mode-pick">
-          <button class="${state.spellMode === 'word' ? 'is-on' : ''}" data-action="spell-mode" data-mode="word">显示单词</button>
-          <button class="${state.spellMode === 'meaning' ? 'is-on' : ''}" data-action="spell-mode" data-mode="meaning">显示词义</button>
-          <button class="${state.spellMode === 'audio' ? 'is-on' : ''}" data-action="spell-mode" data-mode="audio">只听发音</button>
+          <button class="${state.spellSource !== 'all' ? 'is-on' : ''}" data-action="set-spell-source" data-source="learned">只考学过</button>
+          <button class="${state.spellSource === 'all' ? 'is-on' : ''}" data-action="set-spell-source" data-source="all">含新词</button>
         </div>
-        <p class="curve-note">当前：${{ word: '显示单词写单词', meaning: '看中文释义写单词', audio: '只听发音写单词' }[state.spellMode || 'word']}。</p>
-        <button class="btn btn-soft" style="margin-top:12px" data-action="open-spell"><svg><use href="#i-keyboard"/></svg>开始听写</button>
+        <p class="curve-note">当前：${state.spellSource === 'all' ? '学过的词优先，会混入少量新词' : '只考学过的词'}。听写方式在上方的复习卡里切换。</p>
       </section>
 
       <div class="dash-grid" style="margin-top:20px">
@@ -1393,6 +1401,16 @@
 
 /* ===== 12-page-settings.js ===== */
 /* ---------------- Settings ---------------- */
+  function reminderStatusText() {
+    const cfg = reminderConfig();
+    if (!reminderSupported()) return '当前环境不支持系统通知。';
+    const permission = reminderPermission();
+    if (permission === 'denied') return '通知权限被拒绝，需要到系统设置里允许。';
+    if (permission === 'granted' && cfg.enabled) return `已开启，每天 ${cfg.time} 提醒。`;
+    if (permission === 'granted') return '权限已允许，打开开关即可开始。';
+    return '首次开启时会请求通知权限，请选择「允许」。';
+  }
+
   function renderSettings() {
     const goal = state.profile.dailyGoal;
     const books = customBooks();
@@ -1409,19 +1427,6 @@
           <div class="setting-row">
             <div class="label"><strong>记忆曲线</strong><span>10 分钟 → 1 天 → 2 天 → 4 天 → 7 天 → 15 天 → 30 天 → 60 天；答错回到 5 分钟。</span></div>
             <span class="pill pill-accent">艾宾浩斯</span>
-          </div>
-          <div class="setting-row">
-            <div class="label"><strong>当前词库</strong><span>切换后，今日计划会从新词库继续。</span></div>
-            <div class="segmented">
-              <button class="${state.profile.book === 'junior' ? 'is-on' : ''}" data-action="set-book" data-book="junior">初中</button>
-              <button class="${state.profile.book === 'senior' ? 'is-on' : ''}" data-action="set-book" data-book="senior">高中</button>
-              <button class="${state.profile.book === 'zhuanshengben' ? 'is-on' : ''}" data-action="set-book" data-book="zhuanshengben">专升本</button>
-              <button class="${state.profile.book === 'all' ? 'is-on' : ''}" data-action="set-book" data-book="all">全部</button>
-            </div>
-          </div>
-          <div class="setting-row">
-            <div class="label"><strong>乱序背单词</strong><span>开启后，新词从整个词库随机抽取，不按字母顺序。</span></div>
-            <label class="switch"><input type="checkbox" id="shuffle-words" ${state.profile.shuffle ? 'checked' : ''}><span></span></label>
           </div>
           <div class="setting-row">
             <div class="label"><strong>听写范围</strong><span>默认只考学过的词，避免听写没见过的生词。</span></div>
@@ -1456,6 +1461,28 @@
           <div class="setting-row">
             <div class="label"><strong>朗读测试</strong><span>听不到声音时点这里；在线发音需要联网。</span></div>
             <button class="btn btn-sm btn-soft" data-action="test-audio"><svg><use href="#i-volume"/></svg>试听</button>
+          </div>
+        </div>
+
+        <div class="settings-card">
+          <h3>学习提醒</h3><p>到点提醒你今天还没学完的词。第一次开启需要允许通知权限。</p>
+          <div class="setting-row">
+            <div class="label"><strong>每日提醒</strong><span>${reminderStatusText()}</span></div>
+            <label class="switch"><input type="checkbox" id="reminder-on" ${reminderConfig().enabled ? 'checked' : ''}><span></span></label>
+          </div>
+          <div class="setting-row">
+            <div class="label"><strong>提醒时间</strong><span>每天到了这个时间，如果还没完成今日计划就提醒你。</span></div>
+            <input class="text-input" type="time" id="reminder-time" value="${reminderConfig().time}">
+          </div>
+          <div class="setting-row">
+            <div class="label"><strong>权限与测试</strong><span>授权后可以发一条测试通知；被系统拒绝时需要到设置里手动打开。</span></div>
+            <div class="book-item-actions">
+              <button class="btn btn-xs btn-soft" data-action="request-notification">请求权限</button>
+              <button class="btn btn-xs btn-ghost" data-action="test-reminder">测试</button>
+            </div>
+          </div>
+          <div class="setting-row" style="border-bottom:0">
+            <div class="label"><strong>手机说明</strong><span>部分手机会在「电池/后台」里限制通知，需要在系统设置中允许「拾词」通知并允许后台运行。</span></div>
           </div>
         </div>
 
@@ -1554,6 +1581,10 @@
       if (file) file.addEventListener('change', onImportFile);
       const shuffleBox = document.getElementById('shuffle-words');
       if (shuffleBox) shuffleBox.addEventListener('change', onShuffleChange);
+      const reminderBox = document.getElementById('reminder-on');
+      if (reminderBox) reminderBox.addEventListener('change', onReminderToggle);
+      const reminderTime = document.getElementById('reminder-time');
+      if (reminderTime) reminderTime.addEventListener('change', onReminderTime);
     }
     if (custom && typeof custom.afterRender === 'function') custom.afterRender();
     window.scrollTo(0, 0);
@@ -2208,9 +2239,10 @@
   }
 
   const SPELL_MODE_INFO = {
-    word: { title: '看单词，写单词', tip: '照着上面的单词拼写一遍，练手感。', showWord: true },
-    meaning: { title: '看释义，写单词', tip: '根据中文释义回忆单词。', showWord: false },
-    audio: { title: '只听发音，写单词', tip: '听发音，把单词写出来。', showWord: false },
+    // word 模式：给单词，写意思（不自动判对错，只给答案，自己判断）
+    word: { title: '看单词，写意思', tip: '先写下你记得的意思，再看答案自己判断。', showWord: true, writeMeaning: true, placeholder: '输入你记得的中文意思' },
+    meaning: { title: '看释义，写单词', tip: '根据中文释义回忆单词。', showWord: false, placeholder: '输入听到的单词' },
+    audio: { title: '只听发音，写单词', tip: '听发音，把单词写出来。', showWord: false, placeholder: '输入听到的单词' },
   };
 
   function renderSpellModal() {
@@ -2230,10 +2262,16 @@
           ${mode.showWord ? `<div class="spell-word">${esc(w.w)}</div>` : s.mode === 'meaning' ? `<div class="spell-meaning">${esc(w.tr)}</div>` : ''}
           <button class="spell-audio" data-action="spell-play" aria-label="再听一次"><svg><use href="#i-volume"/></svg></button>
           <p class="spell-hint">第 ${s.index + 1} / ${s.queue.length} 个 · 点击喇叭可以再听一次</p>
-          <input class="spell-input" id="spell-input" value="${esc(s.answer || '')}" placeholder="输入听到的单词" autocomplete="off" autocapitalize="off" spellcheck="false" ${s.answered ? 'disabled' : ''}>
-          <div class="spell-feedback ${s.answered ? (s.correct ? 'ok' : 'no') : ''}" id="spell-feedback">${s.answered ? (s.correct ? '✓ 拼写正确' : `✕ 正确拼写：${esc(w.w)}`) : ''}</div>
-          <div class="spell-score"><span>正确 <b>${s.score}</b></span><span>已答 <b>${s.index + (s.answered ? 1 : 0)}</b></span></div>
-          <div style="margin-top:16px"><button class="btn ${s.answered ? 'btn-primary' : 'btn-coral'} btn-block" data-action="${s.answered ? 'spell-next' : 'spell-check'}">${s.answered ? '下一个' : '检查拼写'}</button></div>
+          <input class="spell-input ${mode.writeMeaning ? 'is-meaning' : ''}" id="spell-input" value="${esc(s.answer || '')}" placeholder="${mode.placeholder}" autocomplete="off" autocapitalize="off" spellcheck="false" ${s.answered ? 'disabled' : ''}>
+          ${s.answered ? (mode.writeMeaning ? `
+            <div class="spell-reveal" id="spell-feedback">
+              <div class="spell-reveal-head">正确答案</div>
+              <div class="spell-reveal-answer">${esc(w.w)}</div>
+              <div class="spell-reveal-meaning">${esc(w.tr)}</div>
+            </div>` : `<div class="spell-feedback ${s.correct ? 'ok' : 'no'}" id="spell-feedback">${s.correct ? '✓ 拼写正确' : `✕ 正确拼写：${esc(w.w)}`}</div>`)
+            : ''}
+          ${mode.writeMeaning ? `<div class="spell-score"><span>已答 <b>${s.index + (s.answered ? 1 : 0)}</b> / ${s.queue.length}</span></div>` : `<div class="spell-score"><span>正确 <b>${s.score}</b></span><span>已答 <b>${s.index + (s.answered ? 1 : 0)}</b></span></div>`}
+          <div style="margin-top:16px"><button class="btn ${s.answered ? 'btn-primary' : 'btn-coral'} btn-block" data-action="${s.answered ? 'spell-next' : 'spell-check'}">${s.answered ? '下一个' : (mode.writeMeaning ? '看答案' : '检查拼写')}</button></div>
         </div>
       </div>
     `);
@@ -2259,8 +2297,10 @@
       return;
     }
     const w = s.queue[s.index];
+    const info = SPELL_MODE_INFO[s.mode] || SPELL_MODE_INFO.word;
     const normalize = str => String(str).toLowerCase().replace(/[\s'\-]/g, '');
-    const ok = normalize(value) === normalize(w.w);
+    // 写意思模式不做自动判分，只展示答案，由用户自己判断。
+    const ok = info.writeMeaning ? null : normalize(value) === normalize(w.w);
     s.answered = true;
     s.answer = value;
     s.correct = ok;
@@ -2268,8 +2308,8 @@
     const day = ensureDay();
     day.spell = (day.spell || 0) + 1;
     state.stats.spell = (state.stats.spell || 0) + 1;
-    if (ok) day.correct = (day.correct || 0) + 1;
-    else day.wrong = (day.wrong || 0) + 1;
+    if (ok === true) day.correct = (day.correct || 0) + 1;
+    else if (ok === false) day.wrong = (day.wrong || 0) + 1;
     touchStudy();
     save();
     renderSpellModal();
@@ -2292,14 +2332,17 @@
     if (!s) return;
     const total = s.queue.length;
     const score = s.score;
+    const noJudge = (SPELL_MODE_INFO[s.mode] || {}).writeMeaning;
     openModal(`
       <div class="modal-backdrop" data-action="backdrop">
         <div class="modal-card spell-card" role="dialog" aria-modal="true" aria-label="听写结果">
           <button class="icon-btn modal-close" data-action="close-modal" aria-label="关闭"><svg><use href="#i-close"/></svg></button>
           <div class="summary-badge" style="margin-bottom:14px"><svg><use href="#i-trophy"/></svg></div>
           <div class="eyebrow">SPELLING RESULT</div>
-          <h2 style="margin:5px 0 8px">${score === total ? '全部写对，厉害。' : score >= total * 0.7 ? '很稳，继续保持。' : '再听一遍，会记得更牢。'}</h2>
-          <p class="muted" style="font-size:12px">这一组答对 <strong style="color:var(--accent);font-size:24px;font-family:var(--serif)">${score}</strong> / ${total} 个</p>
+          ${noJudge
+            ? `<h2 style="margin:5px 0 8px">这一组写完了。</h2><p class="muted" style="font-size:12px">写意思模式不判对错，对照下面的答案自己回忆一遍。</p>`
+            : `<h2 style="margin:5px 0 8px">${score === total ? '全部写对，厉害。' : score >= total * 0.7 ? '很稳，继续保持。' : '再听一遍，会记得更牢。'}</h2>
+          <p class="muted" style="font-size:12px">这一组答对 <strong style="color:var(--accent);font-size:24px;font-family:var(--serif)">${score}</strong> / ${total} 个</p>`}
           <div class="summary-words" style="margin-top:20px">${s.queue.map(w => `<span>${esc(w.w)}</span>`).join('')}</div>
           <div class="summary-actions" style="margin-top:18px">
             <button class="btn btn-ghost" data-action="close-modal">先这样</button>
@@ -2568,18 +2611,23 @@
           <pre class="book-sample">apple	苹果	ˈæpl
 banjo,班卓琴
 cherry 樱桃</pre>
-          <!-- A visible <label for> is the only reliable file picker on mobile:
-               programmatic .click() on a hidden input is blocked by iOS/Android browsers. -->
-          <label class="file-picker" for="book-file">
+          <!-- A visible <label for> is the reliable file picker on mobile:
+               programmatic .click() on a hidden input is blocked by iOS/Android. -->
+          <label class="file-picker" for="book-file" data-action="pick-book-file">
             <svg><use href="#i-upload"/></svg>
-            <span><strong>选择词库文件</strong><small>.txt / .csv / .md · 最多 5,000 个词</small></span>
+            <span><strong>从手机文件中选择</strong><small>.txt / .csv / .md · 最多 5,000 个词</small></span>
           </label>
-          <input class="file-input-native" type="file" id="book-file" accept=".txt,.csv,.md,text/plain,text/csv">
-          <div class="import-tip">手机提示：文件要先保存到「文件」App 或手机存储，这里才能选到。也可以点击下方按钮直接粘贴。</div>
+          <input class="file-input-native" type="file" id="book-file" accept=".txt,.csv,.md,text/plain,text/csv,application/vnd.ms-excel">
+          <div class="drop-zone" id="book-drop">也可以把文件拖到这里（电脑）</div>
+          <div class="import-tip">
+            手机提示：点上面的区域会打开系统「文件」界面，第一次使用会请求存储/文件访问权限，请选择「允许」。<br>
+            如果始终选不到文件，用下面的「直接粘贴单词」，同样可以建立词库。
+          </div>
           <button class="btn btn-ghost btn-block" data-action="open-book-paste"><svg><use href="#i-pencil"/></svg>直接粘贴单词</button>
         </div>
       </div>
     `);
+    bindBookDropZone();
   }
 
   function openBookPaste() {
@@ -2616,27 +2664,76 @@ cherry 樱桃</pre>
     toast(`已导入 ${words.length} 个词到「${label}」`, 'book');
   }
 
-  function onBookFile(e) {
-    const file = e.target.files && e.target.files[0];
-    e.target.value = '';
-    if (!file) return;
+  // Decode without relying on the browser guessing the encoding:
+  // Chinese CSVs are often GBK, plain word lists are usually UTF-8.
+  function readFileText(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(reader.error || new Error('read failed'));
+      reader.onload = () => {
+        const buffer = reader.result;
+        try {
+          let text = new TextDecoder('utf-8', { fatal: true }).decode(buffer);
+          if (text.includes('\uFFFD')) throw new Error('not utf8');
+          resolve(text.replace(/^\uFEFF/, ''));
+        } catch {
+          try {
+            resolve(new TextDecoder('gbk').decode(buffer).replace(/^\uFEFF/, ''));
+          } catch {
+            resolve(new TextDecoder().decode(buffer));
+          }
+        }
+      };
+      reader.readAsArrayBuffer(file);
+    });
+  }
+
+  function importBookFile(file) {
+    if (!file) { toast('没有选择文件', 'close'); return; }
+    const okExt = /\.(txt|csv|md|text)$/i.test(file.name || '');
+    if (!okExt) {
+      toast('请选择 .txt、.csv 或 .md 文件', 'close');
+      return;
+    }
     if (file.size > 3 * 1024 * 1024) { toast('文件太大了，请控制在 3MB 以内', 'close'); return; }
-    const reader = new FileReader();
-    reader.onload = () => {
-      const words = parseBookText(String(reader.result));
-      if (words.length < 1) { toast('没有识别到单词，检查一下每行的格式', 'close'); return; }
-      const base = (file.name || '我的词库').replace(/\.[^.]+$/, '').slice(0, 16) || '我的词库';
-      let key = `u_${Date.now().toString(36)}`;
-      saveCustomBook(key, base, words);
-      if (!BOOK_LABELS[key]) registerBook(key, { label: base, filter: w => CUSTOM_WORDS.get(w.id)?.custom === key });
+    readFileText(file).then(text => {
+      const words = parseBookText(text);
+      if (words.length < 1) {
+        toast('没识别到单词，每行写「单词 释义」', 'close');
+        return;
+      }
+      const label = (file.name || '我的词库').replace(/\.[^.]+$/, '').slice(0, 16) || '我的词库';
+      const key = createBookFromText(words, label);
+      if (!key) { toast('导入失败，请检查文件内容', 'close'); return; }
       state.profile.book = key;
       save();
       closeModal();
       topbar();
       navigate('library');
-      toast(`已导入 ${words.length} 个词到「${base}」`, 'book');
-    };
-    reader.readAsText(file);
+      toast(`已导入 ${words.length} 个词到「${label}」`, 'book');
+    }).catch(() => toast('读取文件失败，可以改用「直接粘贴单词」', 'close'));
+  }
+
+  function onBookFile(e) {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = '';
+    if (file) importBookFile(file);
+  }
+
+  /** Bind drag & drop once per modal render (desktop convenience). */
+  function bindBookDropZone() {
+    const zone = document.getElementById('book-drop');
+    if (!zone) return;
+    const clear = () => zone.classList.remove('is-over');
+    zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('is-over'); });
+    zone.addEventListener('dragleave', clear);
+    zone.addEventListener('drop', e => {
+      e.preventDefault();
+      clear();
+      const file = e.dataTransfer?.files?.[0];
+      if (file) importBookFile(file);
+    });
+    zone.addEventListener('click', () => document.getElementById('book-file')?.click());
   }
 
   function deleteCustomBook(key) {
@@ -2729,6 +2826,151 @@ cherry 樱桃</pre>
 
 
 /* ===== 19-events.js ===== */
+/* ---------------- Reminder notifications ---------------- */
+  const REMINDER_KEY = 'shici.reminder.v1';
+
+  function reminderConfig() {
+    const raw = state.profile.reminder;
+    return {
+      enabled: !!(raw && raw.enabled),
+      time: (raw && /^\d{2}:\d{2}$/.test(raw.time)) ? raw.time : '20:00',
+      lastFired: (raw && raw.lastFired) || '',
+    };
+  }
+
+  function reminderSupported() {
+    return typeof Notification !== 'undefined';
+  }
+
+  function reminderPermission() {
+    if (!reminderSupported()) return 'unsupported';
+    return Notification.permission; // default | granted | denied
+  }
+
+  /** Ask for the OS notification permission (mobile needs an explicit grant). */
+  function requestReminderPermission() {
+    return new Promise((resolve) => {
+      if (!reminderSupported()) { resolve('unsupported'); return; }
+      if (Notification.permission === 'granted') { resolve('granted'); return; }
+      if (Notification.permission === 'denied') { resolve('denied'); return; }
+      try {
+        const result = Notification.requestPermission((p) => resolve(p));
+        if (result && typeof result.then === 'function') result.then(resolve).catch(() => resolve('denied'));
+      } catch {
+        resolve('denied');
+      }
+    });
+  }
+
+  let reminderTimer = null;
+
+  function scheduleReminderCheck() {
+    if (reminderTimer) clearTimeout(reminderTimer);
+    const flush = () => { // keep the timestamp in backup files
+      try { localStorage.setItem(REMINDER_KEY, JSON.stringify(reminderConfig())); } catch {}
+    };
+    flush();
+    const tick = () => {
+      checkReminder();
+      reminderTimer = setTimeout(tick, 60 * 1000);
+    };
+    reminderTimer = setTimeout(tick, 60 * 1000);
+  }
+
+  function checkReminder() {
+    const cfg = reminderConfig();
+    if (!cfg.enabled) return;
+    if (reminderPermission() !== 'granted') return;
+    const now = new Date();
+    const [hh, mm] = cfg.time.split(':').map(Number);
+    const target = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hh, mm, 0, 0);
+    if (now < target) return;
+    const today = dateKey(now);
+    if (cfg.lastFired === today) return;
+    const day = getDay(today);
+    const done = (day.new || 0) + (day.review || 0);
+    const goal = state.profile.dailyGoal || 20;
+    if (done >= goal) { markReminderFired(today); return; }
+    fireReminder(done, goal);
+    markReminderFired(today);
+  }
+
+  function markReminderFired(today) {
+    state.profile.reminder = { ...reminderConfig(), lastFired: today };
+    save();
+  }
+
+  function fireReminder(done, goal) {
+    const remain = Math.max(0, goal - done);
+    const title = '拾词 · 今天的词还没拾完';
+    const body = remain ? `还差 ${remain} 个词就到今天的计划了。` : '来复习几个词，让记忆保持温度。';
+    try {
+      const n = new Notification(title, { body, tag: 'shici-daily', icon: 'assets/img/logo.svg', badge: 'assets/img/logo.svg' });
+      n.onclick = () => { try { window.focus(); } catch {} };
+      setTimeout(() => { try { n.close(); } catch {} }, 30000);
+    } catch {
+      // Shown as an in-app fallback where the OS blocks notifications.
+      if (typeof toast === 'function') toast(body, 'sprout');
+    }
+  }
+
+  async function enableReminder(time) {
+    const cfg = reminderConfig();
+    const permission = await requestReminderPermission();
+    if (permission === 'unsupported') {
+      toast('当前环境不支持通知，可以在手机系统设置里给拾词打开通知', 'close');
+      return;
+    }
+    if (permission !== 'granted') {
+      toast('通知权限被拒绝，请到系统设置里手动允许「拾词」通知', 'close');
+      return;
+    }
+    state.profile.reminder = { enabled: true, time: time || cfg.time, lastFired: '' };
+    save();
+    scheduleReminderCheck();
+    renderRoute();
+    toast(`已开启每日 ${state.profile.reminder.time} 提醒`, 'check');
+  }
+
+  function setReminderTime(time) {
+    if (!/^\d{2}:\d{2}$/.test(time || '')) return;
+    const cfg = reminderConfig();
+    state.profile.reminder = { ...cfg, time, lastFired: '' };
+    save();
+    scheduleReminderCheck();
+    renderRoute();
+  }
+
+  function disableReminder() {
+    const cfg = reminderConfig();
+    state.profile.reminder = { ...cfg, enabled: false };
+    save();
+    if (reminderTimer) { clearTimeout(reminderTimer); reminderTimer = null; }
+    renderRoute();
+    toast('已关闭每日提醒', 'check');
+  }
+
+  async function testReminder() {
+    const permission = await requestReminderPermission();
+    if (permission !== 'granted') {
+      toast('需要通知权限才能测试，请允许后重试', 'close');
+      return;
+    }
+    fireReminder(0, state.profile.dailyGoal || 20);
+  }
+
+  function onReminderToggle(e) {
+    if (e.target.checked) {
+      const cfg = reminderConfig();
+      enableReminder(cfg.time);
+    } else {
+      disableReminder();
+    }
+  }
+
+  function onReminderTime(e) {
+    setReminderTime(e.target.value);
+  }
 /* ---------------- Delegated events ---------------- */
   function handleAction(action, el, e) {
     if (CUSTOM_ACTIONS.has(action)) {
@@ -2745,7 +2987,9 @@ cherry 樱桃</pre>
         if (ui.spell) switchSpellMode(el.dataset.mode);
         else setSpellMode(el.dataset.mode);
         break;
-      case 'import-book': document.getElementById('book-file')?.click(); break;
+      case 'pick-book-file': break;
+      case 'request-notification': requestReminderPermission().then(p => { renderRoute(); toast(p === 'granted' ? '通知权限已允许' : '通知权限未开启，请到系统设置里允许', p === 'granted' ? 'check' : 'close'); }); break;
+      case 'test-reminder': testReminder(); break;
       case 'open-book-import': openBookImport(); break;
       case 'open-book-paste': openBookPaste(); break;
       case 'save-pasted-book': savePastedBook(); break;
@@ -2940,6 +3184,8 @@ cherry 樱桃</pre>
     if (isFeatureEnabled('pwa') && 'serviceWorker' in navigator && location.protocol.startsWith('http')) {
       navigator.serviceWorker.register('sw.js').catch(() => {});
     }
+    // Resume the daily reminder loop (checks once a minute while the app is open).
+    setTimeout(() => { try { scheduleReminderCheck(); } catch {} }, 1200);
   }
 
   // Small public extension surface for future feature pieces / debugging.
