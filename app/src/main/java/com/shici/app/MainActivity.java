@@ -34,6 +34,17 @@ public class MainActivity extends Activity {
         settings.setCacheMode(WebSettings.LOAD_DEFAULT);
         settings.setJavaScriptCanOpenWindowsAutomatically(false);
 
+        // Force a phone-sized viewport. Without these lines the WebView can
+        // fall back to a ~980px desktop viewport and render the desktop
+        // sidebar layout on a phone.
+        settings.setUseWideViewPort(true);
+        settings.setLoadWithOverviewMode(true);
+        settings.setSupportZoom(false);
+        settings.setBuiltInZoomControls(false);
+        settings.setDisplayZoomControls(false);
+        settings.setMinimumFontSize(1);
+        settings.setMinimumLogicalFontSize(1);
+
         webView.setWebViewClient(new WebViewClient());
         webView.setWebChromeClient(new WebChromeClient());
         webView.addJavascriptInterface(new TtsBridge(), "AndroidTTS");

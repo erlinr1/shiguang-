@@ -1049,3 +1049,18 @@ body.sidebar-open .mobile-nav { display: none; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; scroll-behavior: auto !important; }
 }
+
+/* Last-resort fallback: the viewport script in index.html adds this class when
+   an embedded WebView ignores the device-width viewport meta and lays the page
+   out with a desktop-width viewport. Keep the phone shell in that case. */
+html.is-forced-mobile .sidebar { display: none !important; }
+html.is-forced-mobile .app-main { margin-left: 0 !important; padding: 0 14px 105px !important; }
+html.is-forced-mobile .mobile-nav { display: grid !important; }
+html.is-forced-mobile .mobile-menu { display: grid !important; }
+html.is-forced-mobile .dash-grid,
+html.is-forced-mobile .stats-grid,
+html.is-forced-mobile .review-hero,
+html.is-forced-mobile .settings-grid,
+html.is-forced-mobile .today-row { grid-template-columns: 1fr !important; }
+html.is-forced-mobile .review-side { grid-template-columns: 1fr !important; }
+html.is-forced-mobile .book-tabs { width: 100% !important; }

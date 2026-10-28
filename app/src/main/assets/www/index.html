@@ -3,6 +3,36 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <script>
+    // Guard against Android WebView rendering a ~980px desktop viewport:
+    // if the layout viewport is far wider than the physical screen, fall back
+    // to the phone layout by declaring a device-width viewport explicitly.
+    (function () {
+      function fixViewport() {
+        var vw = window.innerWidth || document.documentElement.clientWidth;
+        var sw = (window.screen && window.screen.width) || vw;
+        var dpr = window.devicePixelRatio || 1;
+        var physical = Math.min(sw, sw * 1) ;
+        // A phone in portrait is <= ~500 CSS px wide. Anything near 980 means
+        // the WebView ignored the viewport meta and used the desktop default.
+        if (vw > 560 && physical / dpr <= 560) {
+          var meta = document.querySelector('meta[name="viewport"]');
+          if (!meta) {
+            meta = document.createElement('meta');
+            meta.name = 'viewport';
+            document.head.appendChild(meta);
+          }
+          meta.setAttribute('content', 'width=' + Math.round(physical / dpr) + ', initial-scale=1');
+          document.documentElement.classList.add('is-forced-mobile');
+        }
+      }
+      fixViewport();
+      document.addEventListener('DOMContentLoaded', fixViewport);
+      window.addEventListener('resize', function () {
+        if (!document.documentElement.classList.contains('is-forced-mobile')) fixViewport();
+      });
+    })();
+  </script>
   <meta name="description" content="拾词：面向初高中与专升本考生的英语单词学习应用。每天拾起一点词汇的光。">
   <meta name="theme-color" content="#2f5d50">
   <title>拾词 · 初高中 / 专升本英语单词</title>
